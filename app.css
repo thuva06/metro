@@ -71,6 +71,31 @@ button { -webkit-appearance: none; appearance: none; border-radius: 0; }
 /* pull to refresh: a word at the top that answers the finger */
 #pull { position: fixed; top: calc(var(--top) + 10px); left: 0; right: 0; z-index: 39; text-align: center; font-size: 13px; letter-spacing: .3px; color: var(--dim); opacity: 0; pointer-events: none; }
 #pull .b { display: none; }
+/* the converter */
+.convin .curbtn { flex: none; border: 0; background: var(--accent); color: #fff; font: inherit; font-size: 16px; font-weight: 600; padding: 0 14px; }
+.crow { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid rgba(255,255,255,.07); cursor: pointer; }
+.crow:active { background: var(--raised); }
+.crow .t { font-size: 18px; font-weight: 600; letter-spacing: .5px; }
+.crow .cval { font-weight: 300; font-size: 30px; font-variant-numeric: tabular-nums; letter-spacing: -.5px; }
+.crow .rm { width: 34px; height: 34px; flex: none; border: 0; background: none; color: var(--dim); display: flex; align-items: center; justify-content: center; }
+.crow .rm svg { width: 18px; height: 18px; }
+/* the films' pages */
+.flead { position: relative; aspect-ratio: 16 / 10; background: #1a1a1a center / cover; margin-top: 4px; cursor: pointer; overflow: hidden; }
+.flead::after { content: ""; position: absolute; inset: 0; background: linear-gradient(180deg, rgba(0,0,0,0) 40%, rgba(0,0,0,.88)); }
+.flead .words { position: absolute; left: 14px; right: 14px; bottom: 12px; z-index: 1; }
+.flead .svc { position: static; display: inline-block; margin-bottom: 6px; }
+.flead .ti { font-weight: 300; font-size: 30px; line-height: 1.05; letter-spacing: -.4px; }
+.flead .ln { font-size: 14px; color: rgba(255,255,255,.85); margin-top: 4px; }
+.gwide { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px 10px; margin-top: 14px; }
+.gwide .card { width: auto; min-width: 0; }
+.ranks .rk { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,.06); cursor: pointer; }
+.ranks .rk:active { background: var(--raised); }
+.rkn { width: 46px; flex: none; text-align: center; font-weight: 200; font-size: 54px; line-height: 1; letter-spacing: -3px; font-variant-numeric: tabular-nums; }
+.rkp { width: 66px; flex: none; aspect-ratio: 2 / 3; background: #1a1a1a center / cover; }
+.ranks .t { font-size: 18px; }
+.grid2p { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px 12px; margin-top: 4px; }
+.grid2p .poster { width: auto; min-width: 0; }
+.grid2p .poster .n { font-size: 15px; }
 #toast.hold { opacity: 1; }
 /* weather: the cities, then a city */
 .cities { display: flex; flex-direction: column; gap: 10px; margin-top: 6px; }

@@ -409,6 +409,8 @@ const I = {
   grid: '<rect width="7" height="7" x="3" y="3"/><rect width="7" height="7" x="14" y="3"/><rect width="7" height="7" x="14" y="14"/><rect width="7" height="7" x="3" y="14"/>',
   clock: '<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>',
   coins: '<circle cx="8" cy="8" r="6"/><path d="M18.09 10.37A6 6 0 1 1 10.34 18M7 6h1v4M16.71 13.88l.7.71-2.82 2.82"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  close: '<path d="M18 6 6 18M6 6l12 12"/>',
   globe: '<circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15 15 0 0 1 0 20M12 2a15 15 0 0 0 0 20"/>',
   copy: '<rect x="9" y="9" width="12" height="12" rx="1"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/>',
   key: '<circle cx="7.5" cy="15.5" r="4.5"/><path d="m10.7 12.3 9.8-9.8M16 7l3 3M14 9l2 2"/>',
@@ -732,6 +734,21 @@ const posterCard = (t, ranked) => { picked.push(t); return '<div class="poster' 
   '<div class="art" style="' + bg2(t.poster, t.wide) + '"><b class="alt">' + esc(t.title) + '</b>' + (ranked ? '' : svcTag(t)) + '</div><div class="n">' + esc(t.title) + '</div><div class="s">' + esc([t.year || '', t.kind].filter(Boolean).join(' · ')) + '</div></div>'; };
 const wideCard = (t) => { picked.push(t); return '<div class="card" data-t="' + (picked.length - 1) + '"><div class="art" style="' + bg2(t.wide, t.poster) + '">' + svcTag(t) + '</div><div class="n">' + esc(t.title) + '</div><div class="s">' +
   esc(t.label || [t.kind, (t.genres || [])[0]].filter(Boolean).join(' · ')) + '</div></div>'; };
+// the films' pages: trending as one large card and wide cards two across; a top 10 as ranked rows; the rest as larger posters, two across
+function filmsWide(l) {
+  if (!l || !l.length) return none('Nothing here yet');
+  const a = l[0];
+  picked.push(a);
+  return '<div class="flead" data-t="' + (picked.length - 1) + '" style="' + bg2(a.backdrop || a.wide, a.poster) + '"><div class="words">' + svcTag(a) + '<div class="ti">' + esc(a.title) + '</div><div class="ln">' +
+    esc([a.year, (a.genres || []).slice(0, 2).join(' · ')].filter(Boolean).join(' · ')) + '</div></div></div><div class="gwide">' + l.slice(1).map(wideCard).join('') + '</div>';
+}
+function filmsRanked(l) {
+  if (!l || !l.length) return none('Nothing here yet');
+  return '<div class="ranks">' + l.map((t, i) => { picked.push(t); return '<div class="rk" data-t="' + (picked.length - 1) + '"><div class="rkn">' + (t.rank || i + 1) + '</div><div class="rkp" style="' + bg2(t.poster, t.wide) + '"></div><div class="grow"><div class="t">' +
+    esc(t.title) + '</div><div class="s">' + esc([t.year, t.kind, (t.genres || [])[0]].filter(Boolean).join(' · ')) + '</div>' + (t.label ? '<div class="s">' + esc(t.label) + '</div>' : '') +
+    (t.imdb ? '<div class="s">IMDb ' + (+t.imdb).toFixed(1) + '</div>' : '') + '</div>' + chev + '</div>'; }).join('') + '</div>';
+}
+const filmsGrid = (l) => (l && l.length ? '<div class="grid2p">' + l.map((t) => posterCard(t)).join('') + '</div>' : none('Nothing here yet'));
 function filmRow(title, note, l, kind, at) {
   if (!l || !l.length) return '';
   return '<div class="head"><b>' + title + '</b><span>' + esc(note) + '</span><em data-films="' + at + '">all</em></div><div class="row-x' + (kind === 'ranked' ? ' ranked-row' : '') + '">' + l.map((t) => kind === 'wide' ? wideCard(t) : posterCard(t, kind === 'ranked')).join('') + '</div>';
@@ -1031,21 +1048,54 @@ function month() {
   }
   return '<div class="mid" style="margin-top:4px">' + first.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' }).toLowerCase() + '</div><div class="month">' + cells + '</div>';
 }
+function converterOld() {}
+// the converter: any currencies (the TV has every rate), kept on this phone; type in any of them
+const CUR_KEY = 'metro-currencies';
+const curList = () => { try { const l = JSON.parse(localStorage.getItem(CUR_KEY) || 'null'); return Array.isArray(l) && l.length ? l : ['LKR', 'INR']; } catch (e) { return ['LKR', 'INR']; } };
+const curSave = (l) => { try { localStorage.setItem(CUR_KEY, JSON.stringify(l)); } catch (e) { } };
+let curBase = 'AED', curAmt = 1000;
+const curName = (c) => { try { return new Intl.DisplayNames(['en'], { type: 'currency' }).of(c); } catch (e) { return c; } };
+const rateOf = (c) => { const m = S.money || {}; return c === 'AED' ? 1 : c === 'LKR' ? m.lkr : c === 'INR' ? m.inr : (m.rates || {})[c]; };
+const fmtCur = (v) => (v >= 100 ? n0(v) : v >= 1 ? n2(v) : v.toLocaleString('en-GB', { maximumSignificantDigits: 4 }));
 function converter() {
   const m = S.money;
   if (!m) return none('No rates yet');
-  return '<div class="sec">dirhams</div><div class="row"><input id="aed" inputmode="decimal" value="1000"></div><div class="grid2" id="conv"></div>' +
+  return '<div class="sec">amount</div><div class="row convin"><button class="curbtn" id="curbase">' + curBase + '</button><input id="aed" inputmode="decimal" value="' + curAmt + '"></div>' +
+    '<div id="conv"></div><button class="btn" id="curadd" style="margin-top:14px">' + ico('plus') + 'add a currency</button>' +
+    '<div id="curpick" hidden><div class="row" style="margin-top:12px"><input id="curfind" placeholder="find a currency or a country" autocomplete="off" autocapitalize="off"></div><div id="curall"></div></div>' +
     (m.gold ? '<div class="sec">gold · grams of 22K</div><div class="row"><input id="grams" inputmode="decimal" value="8"></div><div class="grid2" id="goldconv"></div>' : '') +
-    '<p class="sub" style="margin-top:14px">At today\'s rates, as the TV has them.</p>';
+    '<p class="sub" style="margin-top:14px">At today\'s market rates. Tap a currency to type in it.</p>';
 }
 function convWire(panel) {
   const a = panel.querySelector('#aed'), g = panel.querySelector('#grams'), m = S.money;
   if (!a) return;
   const draw = () => {
-    const v = parseFloat(a.value.replace(/,/g, '')) || 0;
-    panel.querySelector('#conv').innerHTML = cell('Sri Lanka · LKR', n0(v * m.lkr)) + cell('India · INR', n0(v * m.inr));
+    curAmt = parseFloat(a.value.replace(/,/g, '')) || 0;
+    const aed = curAmt / (rateOf(curBase) || 1);
+    const codes = ['AED'].concat(curList()).filter((c, i, l) => c !== curBase && l.indexOf(c) === i && rateOf(c));
+    panel.querySelector('#conv').innerHTML = codes.map((c) => '<div class="crow" data-cur="' + c + '"><div class="grow"><div class="t">' + c + '</div><div class="s ellip">' + esc(curName(c)) + '</div></div><div class="cval">' +
+      fmtCur(aed * rateOf(c)) + '</div>' + (c === 'AED' ? '<span class="rm"></span>' : '<button class="rm" data-currm="' + c + '" aria-label="Remove">' + ico('close') + '</button>') + '</div>').join('');
+    panel.querySelectorAll('[data-cur]').forEach((r) => (r.onclick = (e) => {
+      if (e.target.closest('[data-currm]')) { curSave(curList().filter((x) => x !== r.dataset.cur)); return draw(); }
+      const v = aed * rateOf(r.dataset.cur);
+      curBase = r.dataset.cur; curAmt = +(v >= 100 ? v.toFixed(0) : v.toFixed(2));
+      a.value = curAmt; panel.querySelector('#curbase').textContent = curBase;
+      draw();
+    }));
     if (g && m.gold) { const x = parseFloat(g.value) || 0; panel.querySelector('#goldconv').innerHTML = cell('22K · AED', n0(x * m.gold.k22)) + cell('24K · AED', n0(x * m.gold.k24)); }
   };
+  panel.querySelector('#curbase').onclick = () => { if (curBase === 'AED') return; const v = curAmt / (rateOf(curBase) || 1); curBase = 'AED'; curAmt = +v.toFixed(2); a.value = curAmt; panel.querySelector('#curbase').textContent = 'AED'; draw(); };
+  const pick = panel.querySelector('#curpick'), find = panel.querySelector('#curfind'), all = panel.querySelector('#curall');
+  const list = () => {
+    const w = find.value.trim().toLowerCase(), have = curList();
+    const codes = Object.keys(m.rates || {}).filter((c) => c !== 'AED' && !have.includes(c)).map((c) => [c, curName(c)])
+      .filter(([c, n]) => !w || c.toLowerCase().includes(w) || n.toLowerCase().includes(w)).sort((x, y) => x[1].localeCompare(y[1])).slice(0, 60);
+    all.innerHTML = codes.map(([c, n]) => '<div class="item tap" data-curadd="' + c + '"><span class="eic" style="font-size:13px;font-weight:600">' + c + '</span><div class="grow"><div class="t">' + esc(n) + '</div><div class="s">1 AED = ' +
+      fmtCur(m.rates[c]) + ' ' + c + '</div></div></div>').join('') || none(m.rates ? 'No currency by that name' : 'The rates come with the TV\'s next answer');
+    all.querySelectorAll('[data-curadd]').forEach((el) => (el.onclick = () => { curSave(curList().concat([el.dataset.curadd])); pick.hidden = true; find.value = ''; toast(el.dataset.curadd + ' added'); draw(); }));
+  };
+  panel.querySelector('#curadd').onclick = () => { pick.hidden = !pick.hidden; if (!pick.hidden) { list(); find.focus(); } };
+  find.oninput = list;
   a.oninput = draw; if (g) g.oninput = draw; draw();
 }
 const agoShort = (ms) => { if (!ms) return ''; const m = Math.max(0, Math.round((Date.now() - ms) / 60000)); return m < 1 ? 'just now' : m < 60 ? m + ' min ago' : m < 1440 ? Math.round(m / 60) + ' h ago' : Math.round(m / 1440) + ' d ago'; };
@@ -1181,13 +1231,13 @@ const PAGES = {
   films: { name: 'films', items: () => [
     ['search', () => '<div class="row" style="margin-top:4px"><input id="find" placeholder="any film or series" enterkeyhint="search" autocomplete="off"><button class="go" id="findgo">' + ico('search') + '</button></div>' +
       '<p class="sub" id="findnote" style="margin-top:10px">Everything on JustWatch: where it streams in the UAE, or the VPN location that gets it.</p><div id="found"></div>'],
-    ['trending', () => grid(films().trending)],
-    ['netflix', () => grid(films().netflix, true)],
-    ['prime video', () => grid(films().prime, true)],
-    ['new', () => grid(films().fresh)],
-    ['series', () => grid(films().netflixShows, true)],
-    ['indian', () => grid(films().indian)],
-    ['highly rated', () => grid(films().rated)],
+    ['trending', () => filmsWide(films().trending)],
+    ['netflix', () => filmsRanked(films().netflix)],
+    ['prime video', () => filmsRanked(films().prime)],
+    ['new', () => filmsGrid(films().fresh)],
+    ['series', () => filmsRanked(films().netflixShows)],
+    ['indian', () => filmsGrid(films().indian)],
+    ['highly rated', () => filmsGrid(films().rated)],
   ] },
   radio: { name: 'radio', items: () => {
     const r = S.radio || { rows: [] };
@@ -2114,7 +2164,18 @@ async function live() {
 setInterval(live, 4000);
 
 /* ---------------------------------------------------------------- start */
-document.addEventListener('visibilitychange', () => { if (!document.hidden) { if (AWAY) Relay.wake(); load(); live(); } });
+// a newer version of the app (the TV updated, or the public page did): it reloads into it, on Start, when it comes back
+const MY_V = ((document.querySelector('script[src*="app.js"]') || {}).src || '').replace(/^.*v=(\d+).*$/, '$1');
+async function newer() {
+  if (page || !MY_V) return;
+  try {
+    const h = await (await fetch(AWAY ? 'index.html' : '/', { cache: 'no-store' })).text();
+    const v = (h.match(/app\.js\?v=(\d+)/) || [])[1];
+    if (v && v !== MY_V && !page) location.reload();
+  } catch (e) { }
+}
+setInterval(() => { if (!document.hidden) newer(); }, 600000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { newer(); if (AWAY) Relay.wake(); load(); live(); } });
 setInterval(() => {
   if (document.hidden) return;
   if (page && page.id === 'match' && page.show && page.show.state === 'in') return loadMatch();
