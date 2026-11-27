@@ -436,8 +436,12 @@ class Pivot {
   }
   down(e) {
     if (this.n < 2 || (e.pointerType === 'mouse' && e.button) || e.target.closest('input,select,textarea,.pad,.keys,.touch,.row-x')) return;
+    this.settle();
     this.s = { x: e.clientX, y: e.clientY, t: performance.now(), id: e.pointerId }; this.mode = null;
   }
+  // still on a copy (a glide round the end not yet done): onto the item itself, which looks the same, so a drag or a
+  // tap straight after never runs off the end
+  settle() { if (this.loop && (this.pos <= 0 || this.pos >= this.n + 1)) { this.pos = this.pos <= 0 ? this.n : 1; this.draw(this.pos, false); } }
   move(e) {
     const s = this.s;
     if (!s || e.pointerId !== s.id) return;
@@ -466,6 +470,7 @@ class Pivot {
   }
   cancel() { if (this.mode === 'x') this.go(0); this.s = null; }
   go(by) {
+    if (by) this.settle();
     let p = this.pos + by;
     if (!this.loop) p = Math.max(0, Math.min(this.n - 1, p));
     this.pos = p;
@@ -480,8 +485,14 @@ class Pivot {
       if (at !== this.at) { this.at = at; if (this.o.onChange) this.o.onChange(at); }
     }, 470);
   }
-  // to item i the short way round
-  to(i) { let d = i - this.at; if (this.loop && Math.abs(d) > this.n / 2) d -= Math.sign(d) * this.n; this.go(d); }
+  // to item i: from where the pivot is going (not where it was), the short way round when that is one step over the
+  // end (there is one copy at each end), else straight along
+  to(i) {
+    const cur = this.loop ? ((this.pos - 1) % this.n + this.n) % this.n : this.pos;
+    let d = i - cur;
+    if (this.loop && Math.abs(d) > this.n / 2 && Math.abs(d - Math.sign(d) * this.n) === 1) d -= Math.sign(d) * this.n;
+    if (d) this.go(d);
+  }
   panel(i) { return this.track.querySelectorAll('.panel:not(.copy)')[i]; }
   panels() { return [...this.track.querySelectorAll('.panel:not(.copy)')]; }
 }
@@ -593,7 +604,7 @@ function tiles() {
     (x.city === 'Colombo' || x.city === 'Mumbai' ? (x.awake ? 'awake' : 'asleep') : x.day) + '</div>') });
   const news = (S.news || []).slice(0, 4);
   if (news.length) T.push({ id: 'news', size: 'w', c: C.crimson, label: 'News', pics: news.map((n) => n.image), faces: news.map((n) =>
-    '<div style="position:absolute;left:12px;right:12px;bottom:28px"><div class="t-k">' + esc(n.source) + (n.ago ? ' · ' + esc(n.ago) + ' ago' : '') + '</div><div class="t-head" style="margin-top:4px">' + esc(n.title) + '</div></div>') });
+    '<div style="position:absolute;left:12px;right:12px;bottom:28px"><div class="t-k">' + esc(n.source) + (storyAgo(n) ? ' · ' + esc(storyAgo(n)) : '') + '</div><div class="t-head" style="margin-top:4px">' + esc(n.title) + '</div></div>') });
   const r = S.radio;
   if (r) T.push({ id: 'radio', size: 'm', c: C.orange, label: 'Radio', faces: [r.on ? '<div class="t-k">' + (r.playing ? 'on now' : r.tuning ? 'tuning in' : 'paused') + '</div><div class="t-mid" style="margin-top:8px;font-size:26px">' + esc(r.name) +
     '</div><div class="t-line t-soft ellip">' + esc(r.song) + '</div>' : '<div style="margin-top:4px">' + ico('radio', 40) + '</div><div class="t-mid" style="margin-top:14px;font-size:24px">metro radio</div><div class="t-line t-soft">Tamil, Hindi, Sinhala</div>'] });
@@ -912,9 +923,10 @@ function convWire(panel) {
   };
   a.oninput = draw; if (g) g.oninput = draw; draw();
 }
-const agoShort = (ms) => { if (!ms) return ''; const m = Math.max(0, Math.round((Date.now() - ms) / 60000)); return m < 60 ? m + ' min' : m < 1440 ? Math.round(m / 60) + ' h' : Math.round(m / 1440) + ' d'; };
+const agoShort = (ms) => { if (!ms) return ''; const m = Math.max(0, Math.round((Date.now() - ms) / 60000)); return m < 1 ? 'just now' : m < 60 ? m + ' min ago' : m < 1440 ? Math.round(m / 60) + ' h ago' : Math.round(m / 1440) + ' d ago'; };
+const storyAgo = (n) => (n.published ? agoShort(n.published) : n.ago ? n.ago + ' ago' : '');
 const newsList = (l) => l.map((n) => '<div class="news">' + (n.image ? '<div class="pic" style="' + bg(n.image) + '"></div>' : '') + '<div class="s">' + esc(n.source) +
-  ((n.published ? agoShort(n.published) : n.ago) ? ' · ' + esc(n.published ? agoShort(n.published) : n.ago) + ' ago' : '') +
+  (storyAgo(n) ? ' · ' + esc(storyAgo(n)) : '') +
   '</div><div class="t">' + esc(n.title) + '</div><div class="sum">' + esc(n.summary) + '</div></div>').join('') || none('No stories here yet');
 function newsBy(cat) { return newsList((S.news || []).filter((n) => !cat || (n.cat || '').toLowerCase() === cat)); }
 function newsItems() {
