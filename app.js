@@ -207,7 +207,9 @@ function toast(t) {
 function offline(on) {
   const o = $('#offline');
   o.hidden = !on;
-  if (on) o.textContent = (AWAY && !Relay.on ? 'Offline' : 'The TV is off') + ' · showing what it said' + (seen ? ' at ' + (Date.now() - seen > 864e5 ? dayOf(seen) + ' ' : '') + hm(seen) : ' last');
+  if (on) o.textContent = (AWAY && !Relay.on ? 'Offline' : 'The TV is off') + (AWAY && cloudAt ? ' · the weather is live, the rest' : ' · showing what it said') +
+    (seen ? (cloudAt ? ' from ' : ' at ') + (Date.now() - seen > 864e5 ? dayOf(seen) + ' ' : '') + hm(seen) : ' last');
+  else cloudAt = 0;
 }
 async function load() {
   try {
@@ -1345,6 +1347,49 @@ function drawBar() {
   }));
 }
 
+/* ---------------------------------------------------------------- the weather from the internet, with the TV off */
+// Away from home with the TV off (no answer for five minutes), the weather comes from Open-Meteo straight, as the TV
+// gets it (Dubai in full, Mannar and Mumbai), every half hour; the rest stays as the TV last said it.
+const CITIES = [['Dubai', 'United Arab Emirates', 25.2048, 55.2708, 'Asia/Dubai'], ['Mannar', 'Sri Lanka', 8.981, 79.9044, 'Asia/Colombo'], ['Mumbai', 'India', 19.076, 72.8777, 'Asia/Kolkata']];
+const skyOf = (c) => c <= 1 ? 'Clear' : c === 2 ? 'PartlyCloudy' : c === 3 ? 'Cloudy' : c === 45 || c === 48 ? 'Fog' : c >= 51 && c <= 57 ? 'Drizzle' : c >= 61 && c <= 67 ? 'Rain' :
+  c >= 80 && c <= 82 ? 'Showers' : (c >= 71 && c <= 77) || c === 85 || c === 86 ? 'Snow' : c >= 95 ? 'Storm' : 'Cloudy';
+const condOf = (c, day) => c === 0 ? (day ? 'Sunny' : 'Clear') : c === 1 ? (day ? 'Mostly sunny' : 'Mostly clear') : ({ 2: 'Partly cloudy', 3: 'Cloudy', 45: 'Fog', 48: 'Fog', 51: 'Drizzle', 53: 'Drizzle', 55: 'Drizzle',
+  56: 'Freezing drizzle', 57: 'Freezing drizzle', 61: 'Light rain', 63: 'Rain', 65: 'Heavy rain', 66: 'Freezing rain', 67: 'Freezing rain', 71: 'Snow', 73: 'Snow', 75: 'Snow', 77: 'Snow',
+  80: 'Showers', 81: 'Showers', 82: 'Heavy showers', 85: 'Snow showers', 86: 'Snow showers', 95: 'Thunderstorm', 96: 'Thunderstorm with hail', 99: 'Thunderstorm with hail' })[c] || 'Cloudy';
+const compass = (d) => ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round((((d % 360) + 360) % 360) / 45) % 8];
+const aqiSaid = (a) => a <= 50 ? 'Good' : a <= 100 ? 'Moderate' : a <= 150 ? 'Unhealthy for some' : a <= 200 ? 'Unhealthy' : a <= 300 ? 'Very unhealthy' : 'Hazardous';
+async function skyFor([city, country, lat, lon, tz], full) {
+  const at = '?latitude=' + lat + '&longitude=' + lon + '&timezone=' + encodeURIComponent(tz);
+  const [f, air] = await Promise.all([
+    fetch('https://api.open-meteo.com/v1/forecast' + at + '&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m,wind_direction_10m,is_day,uv_index,surface_pressure,cloud_cover,visibility' +
+      '&hourly=temperature_2m,weather_code,is_day,precipitation_probability&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset,precipitation_probability_max&forecast_days=8').then((r) => r.json()),
+    full ? fetch('https://air-quality-api.open-meteo.com/v1/air-quality' + at + '&current=us_aqi,pm2_5').then((r) => r.json()).catch(() => null) : null]);
+  const c = f.current, h = f.hourly, d = f.daily, day = c.is_day === 1, a = (air && air.current) || {};
+  const start = Math.max(0, h.time.findIndex((t) => t.startsWith(c.time.slice(0, 13))));
+  const hours = h.time.slice(start, start + 24).map((t, k) => ({ label: k ? t.slice(11) : 'Now', temp: Math.round(h.temperature_2m[start + k]), sky: skyOf(h.weather_code[start + k]),
+    day: h.is_day[start + k] === 1, rain: (h.precipitation_probability || [])[start + k] || 0 }));
+  const days = d.time.slice(1, 8).map((t, k) => { const i = k + 1, dt = new Date(t + 'T12:00:00Z');
+    return { day: dt.toLocaleDateString('en-GB', { weekday: 'short', timeZone: 'UTC' }), date: dt.getUTCDate() + ' ' + dt.toLocaleDateString('en-GB', { month: 'short', timeZone: 'UTC' }),
+      high: Math.round(d.temperature_2m_max[i]), low: Math.round(d.temperature_2m_min[i]), sky: skyOf(d.weather_code[i]), rain: (d.precipitation_probability_max || [])[i] || 0, condition: condOf(d.weather_code[i], true) }; });
+  return { city, country, temp: Math.round(c.temperature_2m), feels: Math.round(c.apparent_temperature), condition: condOf(c.weather_code, day), sky: skyOf(c.weather_code), day,
+    high: Math.round(d.temperature_2m_max[0]), low: Math.round(d.temperature_2m_min[0]), humidity: Math.round(c.relative_humidity_2m), wind: Math.round(c.wind_speed_10m), windFrom: compass(c.wind_direction_10m),
+    uv: Math.round(c.uv_index || 0), sunrise: d.sunrise[0].slice(11), sunset: d.sunset[0].slice(11), aqi: a.us_aqi == null ? null : a.us_aqi, aqiLabel: a.us_aqi == null ? '' : aqiSaid(a.us_aqi),
+    pm25: a.pm2_5 == null ? null : Math.round(a.pm2_5), at: Date.now(), visibility: Math.round((c.visibility || 0) / 1000), pressure: Math.round(c.surface_pressure || 0), cloud: Math.round(c.cloud_cover || 0),
+    time: new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: tz }), hours, days };
+}
+let cloudAt = 0;
+async function cloud() {
+  if (!AWAY || !S || Date.now() - seen < 300000 || Date.now() - cloudAt < 1800000) return;
+  const all = await Promise.all(CITIES.map((c, i) => skyFor(c, i === 0).catch(() => null)));
+  if (!all[0]) return;
+  cloudAt = Date.now();
+  S.weather = Object.assign({}, S.weather, all[0]);
+  const cities = all.slice(1).filter(Boolean).map((w) => Object.assign({}, w, { hours: w.hours.slice(0, 12) }));
+  if (cities.length) S.cities = cities;
+  offline(true);
+  if (!page) drawStart(); else if (page.id === 'weather' && pivot) pivot.panels().forEach((_, i) => redrawPanel(i));
+}
+
 /* ---------------------------------------------------------------- live */
 // What is playing, the radio, the AC, the timer and the notifications, every four seconds while the app is open:
 // only what changed is drawn again (the tiles that show it on Start; the page's item that shows it).
@@ -1371,6 +1416,7 @@ setInterval(() => {
   if (document.hidden) return;
   if (page && page.id === 'match' && page.show && page.show.state === 'in') return loadMatch();
   if (!(page && ['remote', 'title', 'photos', 'films', 'settings', 'money', 'timer', 'apps', 'match', 'story'].includes(page.id))) load();
+  cloud();
 }, 30000);
 setInterval(() => { if (!page && S) drawStatus(); }, 15000);
 // away from home, the TV's app icons come through the relay too
@@ -1381,7 +1427,7 @@ if (AWAY) new MutationObserver(() => document.querySelectorAll('img[data-icon]:n
 async function boot() {
   if (AWAY) { if (!(await Relay.ready())) return pairGate(); Relay.fonts(); }
   const j = await call('hello', '', AWAY ? 9000 : 6000).catch(() => null);
-  if (!j) { offline(true); if (!S) load(); return; }
+  if (!j) { offline(true); if (!S) load(); cloud(); return; }
   if (j.need) gate(); else load();
 }
 (async () => {
