@@ -71,6 +71,41 @@ button { -webkit-appearance: none; appearance: none; border-radius: 0; }
 /* pull to refresh: a word at the top that answers the finger */
 #pull { position: fixed; top: calc(var(--top) + 10px); left: 0; right: 0; z-index: 39; text-align: center; font-size: 13px; letter-spacing: .3px; color: var(--dim); opacity: 0; pointer-events: none; }
 #pull .b { display: none; }
+#toast.hold { opacity: 1; }
+/* weather: the cities, then a city */
+.cities { display: flex; flex-direction: column; gap: 10px; margin-top: 6px; }
+.ccard { position: relative; padding: 16px 16px 14px; color: #fff; overflow: hidden; }
+.ccard.tap { cursor: pointer; transition: transform .14s ease-out; }
+.ccard.tap:active { transform: perspective(700px) rotateX(5deg) scale(.97); }
+.ccard .ctop { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+.ccard .cname { font-weight: 300; font-size: 30px; letter-spacing: -.4px; line-height: 1.05; }
+.ccard .cmeta { font-size: 13px; color: rgba(255,255,255,.8); margin-top: 3px; }
+.ccard .ctemp { font-weight: 200; font-size: 58px; line-height: .95; letter-spacing: -2px; font-variant-numeric: tabular-nums; }
+.ccard .cmid { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 16px; }
+.ccard .cmid .chl { margin-left: auto; color: rgba(255,255,255,.85); font-variant-numeric: tabular-nums; }
+.ccard .chours { display: flex; justify-content: space-between; margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,.18); }
+.ccard .chours div { display: flex; flex-direction: column; align-items: center; gap: 4px; font-size: 12px; color: rgba(255,255,255,.85); }
+.ccard .chours b { font-weight: 400; font-size: 15px; color: #fff; }
+.ccard.big { margin-top: 6px; padding-bottom: 18px; }
+.ccard .cnow { display: flex; align-items: center; gap: 18px; margin-top: 10px; }
+.ccard.big .ctemp { font-size: 96px; letter-spacing: -4px; }
+.ccard .ccond { font-size: 22px; font-weight: 300; margin-top: 4px; }
+.range { display: flex; align-items: center; gap: 8px; flex: none; width: 46%; font-variant-numeric: tabular-nums; font-size: 15px; }
+.range span:first-child { color: var(--dim); width: 32px; text-align: right; }
+.range i { position: relative; flex: 1; height: 4px; background: rgba(255,255,255,.12); }
+.range b { position: absolute; top: 0; bottom: 0; background: linear-gradient(90deg, #4fc3f7, #ffb74d); }
+/* short tables */
+.tblhead { display: flex; align-items: baseline; justify-content: space-between; }
+.more { background: none; border: 0; color: var(--accent); font: inherit; font-size: 14px; padding: 6px 0 6px 12px; }
+.tbl tr.gap td { text-align: center; color: var(--faint); font-size: 12px; padding: 2px 0; letter-spacing: 4px; }
+.tblbox + .tblbox { margin-top: 18px; }
+/* search */
+.eic { width: 40px; height: 40px; flex: none; display: flex; align-items: center; justify-content: center; background: var(--raised); }
+.eic svg { width: 22px; height: 22px; opacity: .9; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.chip { border: 2px solid rgba(255,255,255,.35); background: none; color: #fff; font: inherit; font-size: 15px; padding: 6px 12px; }
+.chip:active { background: #fff; color: #000; }
+input[type=search]::-webkit-search-cancel-button { filter: invert(1); }
 /* opening: Start turns in from the left, a part after another, as Windows Phone opens an app */
 .lin { animation: launchIn .62s cubic-bezier(.1,.9,.2,1) both; animation-delay: calc(var(--li, 0) * 38ms); transform-origin: 0 50%; }
 @keyframes launchIn { from { opacity: 0; transform: perspective(1000px) rotateY(-64deg) translateX(-10px); } }

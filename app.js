@@ -167,7 +167,15 @@ const Relay = (() => {
   R.call = async (p, a, ms) => {
     if (!(await ready())) return { ok: false, need: 'pair' };
     const q = Object.fromEntries(new URLSearchParams(a || ''));
-    if (p === 'ac' && await hub()) return json(await ask('hub', '/press', q, 40000));
+    if (p === 'ac' && await hub()) {
+      // the hub presses (the TV may be off): the TV's card is told too, pressing and then how it went
+      const note = (o) => ask('tv', '/api/acnote', o, 8000).catch(() => { });
+      note({ state: 'pressing', line: 'From your phone' });
+      let j;
+      try { j = json(await ask('hub', '/press', q, 40000)); } catch (e) { note({ state: 'fail', line: "The hub didn't answer" }); throw e; }
+      note({ state: j.ok ? 'ok' : j.sent ? 'sent' : 'fail', line: j.line || '' });
+      return j;
+    }
     if (p === 'schedules' && await hub()) {
       const j = json(await ask('hub', '/schedules', q, 10000));
       j.ok = true;
@@ -221,19 +229,41 @@ function busy(pr) {
   return Promise.resolve(pr).then((v) => { done(); return v; }, (e) => { done(); throw e; });
 }
 async function act(p, a, quiet) {
+  if (p === 'ac') return acPress();
   try {
     const j = await (p === 'key' ? call(p, a) : busy(call(p, a)));
     if (j.need) return gate();
     if (!quiet || !j.ok) toast(j.line || (j.ok ? 'Done' : "That didn't work"));
     return j;
-  } catch (e) { toast(AWAY ? (Relay.on ? "The TV didn't answer: it may be off" : "The relay can't be reached: is this phone online?") : S ? 'The TV is off or away from the Wi-Fi' : "The TV didn't answer"); offline(true); }
+  } catch (e) { toast(AWAY ? (Relay.on ? "The TV didn't answer: it may be off" : "The relay can't be reached: is this phone online?") : S ? 'The TV is off or away from the Wi-Fi' : "The TV didn't answer"); trouble(); }
 }
 const q = (k, v) => k + '=' + encodeURIComponent(v);
-function toast(t) {
+function toast(t, stay, ms) {
   if (!t) return;
   const m = $('#toast'); m.textContent = t; m.classList.add('on');
-  clearTimeout(m.t); m.t = setTimeout(() => m.classList.remove('on'), 2800);
+  m.classList.toggle('hold', !!stay);
+  clearTimeout(m.t);
+  if (!stay) m.t = setTimeout(() => m.classList.remove('on', 'hold'), ms || 2800);
 }
+// the AC: "pressing" stays until the press is done, then how it went (the TV's card says the same)
+let acBusy = false;
+async function acPress() {
+  if (acBusy) return toast('A press is already on its way');
+  acBusy = true;
+  toast('Pressing the AC…', true);
+  let j = null;
+  try { j = await busy(call('ac', '', 45000)); } catch (e) { }
+  acBusy = false;
+  if (j && j.need) { $('#toast').classList.remove('on', 'hold'); return gate(); }
+  const line = j ? String(j.line || '').replace(/^Pressed\s*/i, '') : '';
+  if (j && j.ok) toast('AC pressed' + (line ? ' · ' + line : ''), false, 3500);
+  else toast(j && j.sent ? 'Sent to the AC, not confirmed' + (j.line ? ': ' + j.line : '') : (j && j.line) || (AWAY ? "The AC didn't answer through the relay" : "The TV didn't answer"), false, 7000);
+  if (j && S) { S.ac = { at: Date.now(), ok: !!j.ok, line: j.line || '' }; if (page && page.id === 'ac' && pivot) redrawPanel(pivot.at); }
+  return j;
+}
+let fails = 0;
+function trouble() { fails++; if (fails >= 2 || !S) offline(true); }
+function fine() { fails = 0; offline(false); }
 function offline(on) {
   const o = $('#offline');
   o.hidden = !on;
@@ -250,12 +280,12 @@ async function load() {
     lastSig = sig;
     S = j; seen = Date.now();
     try { localStorage.setItem('metro-state', JSON.stringify(j)); localStorage.setItem('metro-seen', String(seen)); } catch (e) { }
-    offline(false);
+    fine();
     applyAccent();
     if (same) return;
     if (page) { if (!['remote', 'title', 'photos', 'films', 'settings', 'money', 'timer', 'apps'].includes(page.id) && pivot) pivot.panels().forEach((_, i) => redrawPanel(i)); }
     else drawStart();
-  } catch (e) { offline(true); if (!S) $('#startBody').innerHTML = '<p class="sub" style="margin-top:40px">' + (AWAY ? 'The TV didn\'t answer through the relay, and nothing is kept from it yet. Is it on?' : 'The TV didn\'t answer. Is it on, and this phone on the home Wi-Fi?') + '</p>'; }
+  } catch (e) { trouble(); if (fails === 1) setTimeout(load, 2500); if (!S) $('#startBody').innerHTML = '<p class="sub" style="margin-top:40px">' + (AWAY ? 'The TV didn\'t answer through the relay, and nothing is kept from it yet. Is it on?' : 'The TV didn\'t answer. Is it on, and this phone on the home Wi-Fi?') + '</p>'; }
 }
 // what a redraw depends on (not the clock, which ticks on its own)
 let lastSig = '';
@@ -296,7 +326,6 @@ if (AWAY) Relay.onState = (st, t) => {
   S = st; seen = t;
   try { localStorage.setItem('metro-state', JSON.stringify(st)); localStorage.setItem('metro-seen', String(t)); } catch (e) { }
   applyAccent();
-  if (Date.now() - t > 120000) offline(true);
   if (fresh || !page) drawStart();
 };
 
@@ -413,7 +442,7 @@ function drawStatus() {
   const w = S && S.weather, tv = S && S.tv;
   // the TV at a glance: lit when it is off (a tap turns it on), quiet when on (a tap opens the remote)
   const off = tv && tv.on === false;
-  $('#status').innerHTML = (tv ? '<button class="tvst' + (off ? ' off' : '') + '" ' + (off ? 'data-power="on"' : 'data-tvremote') + ' aria-label="' + (off ? 'Turn the TV on' : 'The remote') + '">' +
+  $('#status').innerHTML = '<button class="tvst" data-search aria-label="Search">' + ico('search') + '</button>' + (tv ? '<button class="tvst' + (off ? ' off' : '') + '" ' + (off ? 'data-power="on"' : 'data-tvremote') + ' aria-label="' + (off ? 'Turn the TV on' : 'The remote') + '">' +
     ico('tv') + (off ? '<span>off</span>' : '') + '</button>' : '') + (w ? ico(skyIcon(w.sky, w.day)) + '<span>' + w.temp + '°</span>' : '') + '<span class="t">' + hm(Date.now()) + '</span>';
 }
 // the TV's power row, on the remote: whether it is on and what it shows, and the key that turns it on or off
@@ -426,6 +455,7 @@ function tvPower() {
 // the power key, wherever it shows; the state changes at once here, and the TV confirms it within seconds
 document.addEventListener('click', async (e) => {
   if (e.target.closest('[data-tvremote]')) return open('remote', 0);
+  if (e.target.closest('[data-search]')) return open('search', 0);
   const b = e.target.closest('[data-power]');
   if (!b || b.classList.contains('busy')) return;
   const on = b.dataset.power === 'on';
@@ -783,7 +813,7 @@ function drawStart() {
 }
 
 /* ---------------------------------------------------------------- page pieces */
-const TV = { timer: 'Timer', apps: 'Apps', weather: 'Weather', bayern: 'Bayern', cricket: 'Sports', money: 'Money', news: 'Reader', calendar: 'Calendar', ac: 'Ac', clocks: 'Clocks', verse: 'Bible', notes: 'Notifications', radio: 'Music' };
+const TV = { timer: 'Timer', apps: 'Apps', weather: 'Weather', bayern: 'Bayern', cricket: 'Sports', money: 'Money', news: 'Reader', calendar: 'Calendar', ac: 'Ac', clocks: 'Clocks', verse: 'Bible', notes: 'Notifications', radio: 'Music', city: 'Weather' };
 const none = (t) => '<p class="sub" style="margin-top:14px">' + esc(t) + '</p>';
 const cell = (s, v) => '<div class="cell"><div class="s">' + s + '</div><div class="v">' + v + '</div></div>';
 const padBtn = (k) => '<button data-k="' + k + '">' + ico(k) + '</button>';
@@ -814,10 +844,26 @@ function cricketItem(g) {
     ' <span class="dim">' + esc(g.away.score) + '</span></div><div class="s">' + esc(g.league) + ' · ' + esc(g.state === 'pre' ? dayOf(g.start) + ' ' + hm(g.start) : (g.note || g.status)) + '</div></div>' + chev + '</div>';
 }
 const list = (gs, title, res) => (gs && gs.length ? (title ? '<div class="sec">' + title + '</div>' : '') + gs.map((g) => footItem(g, res)).join('') : '');
-function table(t) {
-  return '<div class="sub">' + esc(t.name) + '</div><table class="tbl">' + t.rows.map((r) => '<tr class="' + (r.us ? 'us' : '') + '"><td class="n">' + r.rank + '</td><td>' + crest(r.logo, '') + esc(r.team) +
-    '</td><td class="g">' + esc(r.gd) + '</td><td class="p">' + r.points + '</td></tr>').join('') + '</table>';
+function table(t, full) {
+  const rows = t.rows, n = rows.length, us = rows.find((r) => r.us), ur = us ? us.rank : 0;
+  const keep = (r) => full || n <= 10 || r.rank <= 4 || (ur && Math.abs(r.rank - ur) <= 2) || r.rank > n - 2;
+  let last = 0, html = '';
+  rows.forEach((r) => {
+    if (!keep(r)) return;
+    if (last && r.rank > last + 1) html += '<tr class="gap"><td colspan="4">· · ·</td></tr>';
+    last = r.rank;
+    html += '<tr class="' + (r.us ? 'us' : '') + '"><td class="n">' + r.rank + '</td><td>' + crest(r.logo, '') + esc(r.team) + '</td><td class="g">' + esc(r.gd) + '</td><td class="p">' + r.points + '</td></tr>';
+  });
+  return '<div class="tblbox" data-tname="' + esc(t.name) + '"><div class="tblhead"><span class="sub">' + esc(t.name) + '</span>' + (n > 10 ? '<button class="more" data-full="' + (full ? 0 : 1) + '">' +
+    (full ? 'shorter' : 'all ' + n) + '</button>' : '') + '</div><table class="tbl">' + html + '</table></div>';
 }
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('[data-full]');
+  if (!b || !S) return;
+  const box = b.closest('.tblbox'), name = box.dataset.tname;
+  const t = [].concat((S.bayern || {}).tables || [], (S.germany || {}).tables || []).find((x) => x.name === name);
+  if (t) box.outerHTML = table(t, b.dataset.full === '1');
+});
 // a city's weather (Mannar, Mumbai): now, the next hours, the week
 function cityPanel(c) {
   return '<div style="display:flex;align-items:center;gap:16px;margin-top:8px"><div class="big" style="font-size:88px">' + c.temp + '°</div><div>' + ico(skyIcon(c.sky, c.day), 48) + '<div class="mid" style="font-size:24px">' +
@@ -1039,20 +1085,57 @@ function feedsIn() {
   return changed;
 }
 
+/* ---------------------------------------------------------------- the weather: the cities, then a city in full */
+const allCities = () => [].concat(S.weather ? [Object.assign({ main: true }, S.weather)] : [], S.cities || []);
+const cityOf = (i) => allCities()[+i || 0];
+// a card's sky: day or night, clear, cloudy or wet
+function skyTone(sky, day) {
+  if (/Rain|Showers|Storm|Drizzle/.test(sky)) return day ? 'linear-gradient(160deg,#4b6274,#1d2b36)' : 'linear-gradient(160deg,#22303b,#0b1117)';
+  if (/Cloudy|Fog/.test(sky)) return day ? 'linear-gradient(160deg,#6f8696,#33434f)' : 'linear-gradient(160deg,#2b3640,#10161b)';
+  if (/Partly/.test(sky)) return day ? 'linear-gradient(160deg,#3a8fd6,#1f4f86)' : 'linear-gradient(160deg,#18294a,#070d1a)';
+  return day ? 'linear-gradient(160deg,#2f9cf0,#0f5aa8)' : 'linear-gradient(160deg,#142650,#050a17)';
+}
+const localTime = (c) => (c.main ? hm(Date.now()) : c.time || '');
+function cityCards() {
+  const l = allCities();
+  if (!l.length) return none('No weather yet');
+  return '<div class="cities">' + l.map((c, i) => '<div class="ccard tap" data-city="' + i + '" style="background:' + skyTone(c.sky, c.day) + '"><div class="ctop"><div><div class="cname">' + esc(c.city) +
+    '</div><div class="cmeta">' + esc([localTime(c), c.country || 'United Arab Emirates'].filter(Boolean).join(' · ')) + '</div></div><div class="ctemp">' + c.temp + '°</div></div>' +
+    '<div class="cmid">' + ico(skyIcon(c.sky, c.day), 30) + '<span>' + esc(String(c.condition || '').toLowerCase()) + '</span><span class="chl">' + c.high + '° / ' + c.low + '°</span></div>' +
+    '<div class="chours">' + (c.hours || []).slice(1, 7).map((h) => '<div><span>' + esc(h.label) + '</span>' + ico(skyIcon(h.sky, h.day), 20) + '<b>' + h.temp + '°</b></div>').join('') + '</div></div>').join('') + '</div>' +
+    '<p class="sub" style="margin-top:12px">Tap a city for its hours, its week and the details.</p>';
+}
+function cityNow(c) {
+  return '<div class="ccard big" style="background:' + skyTone(c.sky, c.day) + '"><div class="ctop"><div><div class="cname">' + esc(c.city) + '</div><div class="cmeta">' + esc(localTime(c)) + ' there</div></div></div>' +
+    '<div class="cnow"><div class="ctemp">' + c.temp + '°</div><div>' + ico(skyIcon(c.sky, c.day), 54) + '<div class="ccond">' + esc(String(c.condition || '').toLowerCase()) + '</div></div></div>' +
+    '<div class="cmeta" style="margin-top:6px">feels like ' + c.feels + '° · ' + c.high + '° / ' + c.low + '°' + (c.humidity != null ? ' · humidity ' + c.humidity + '%' : '') + '</div></div>' +
+    hoursChart(c.hours || []) + cityWeek(c, 3) + (c.at ? '<p class="sub" style="margin-top:12px">updated ' + ago(c.at) + '</p>' : '');
+}
+const cityHours = (c) => (c.hours || []).map((h) => '<div class="item">' + ico(skyIcon(h.sky, h.day)) + '<div class="grow"><div class="t">' + esc(h.label) + '</div>' +
+  (h.rain ? '<div class="s">rain ' + h.rain + '%</div>' : '') + '</div><div class="r" style="font-weight:300;font-size:28px">' + h.temp + '°</div></div>').join('') || none('No forecast yet');
+function cityWeek(c, only) {
+  const days = (c.days || []).slice(0, only || 7);
+  if (!days.length) return only ? '' : none('No forecast yet');
+  const lo = Math.min(...days.map((d) => d.low)), hi = Math.max(...days.map((d) => d.high)), span = hi - lo || 1;
+  return (only ? '<div class="sec">the next days</div>' : '') + days.map((d, i) => '<div class="item">' + ico(skyIcon(d.sky, true)) + '<div class="grow"><div class="t">' + (i === 0 && !only ? esc(d.day) : esc(d.day)) +
+    (d.date ? ' <span class="s" style="display:inline">' + esc(d.date) + '</span>' : '') + '</div><div class="s">' + esc(d.condition || '') + (d.rain ? (d.condition ? ' · ' : '') + 'rain ' + d.rain + '%' : '') + '</div></div>' +
+    '<div class="range"><span>' + d.low + '°</span><i><b style="left:' + ((d.low - lo) / span * 100).toFixed(0) + '%;right:' + ((hi - d.high) / span * 100).toFixed(0) + '%"></b></i><span>' + d.high + '°</span></div></div>').join('');
+}
+function cityDetails(c) {
+  const cells = [['humidity', c.humidity != null && c.humidity + '%'], ['wind', c.wind != null && c.wind + ' km/h ' + esc(c.windFrom || '')], ['feels like', c.feels != null && c.feels + '°'],
+    ['UV index', c.uv], ['air', c.aqi != null && c.aqi + ' <span style="font-size:14px">' + esc(c.aqiLabel || '') + '</span>'], ['PM2.5', c.pm25 != null && c.pm25 + ' µg'],
+    ['sunrise', c.sunrise && esc(c.sunrise)], ['sunset', c.sunset && esc(c.sunset)], ['visibility', c.visibility != null && c.visibility + ' km'],
+    ['pressure', c.pressure && c.pressure + ' hPa'], ['cloud', c.cloud != null && c.cloud + '%']].filter((x) => x[1] !== undefined && x[1] !== false && x[1] !== null && x[1] !== '');
+  return '<div class="grid2">' + cells.map((x) => cell(x[0], x[1])).join('') + '</div>' + (c.main ? '' : '<p class="sub" style="margin-top:12px">The air, the sun and the rest are kept for Dubai.</p>');
+}
+document.addEventListener('click', (e) => { const c = e.target.closest('[data-city]'); if (c) open('city', 0, +c.dataset.city); });
+
 /* ---------------------------------------------------------------- the pages */
 const PAGES = {
-  weather: { name: 'weather', items: () => [
-    ['dubai', () => { const w = S.weather; if (!w) return none('No weather yet');
-      return '<div style="display:flex;align-items:center;gap:18px;margin-top:8px"><div class="big">' + w.temp + '°</div><div>' + ico(skyIcon(w.sky, w.day), 56) + '<div class="mid" style="font-size:26px;margin-top:4px">' + esc(w.condition.toLowerCase()) + '</div></div></div>' +
-        '<div class="sub" style="margin-top:8px">' + esc(w.city) + ' · feels like ' + w.feels + '° · ' + w.high + '° / ' + w.low + '°</div>' + hoursChart(w.hours) + '<div class="grid2">' +
-        cell('humidity', w.humidity + '%') + cell('wind', w.wind + ' km/h ' + esc(w.windFrom)) + cell('UV index', w.uv) + cell('air', w.aqi == null ? '–' : w.aqi + ' <span style="font-size:14px">' + esc(w.aqiLabel) + '</span>') +
-        cell('sunrise', esc(w.sunrise)) + cell('sunset', esc(w.sunset)) + cell('visibility', (w.visibility || '–') + ' km') + cell('pressure', (w.pressure || '–') + ' hPa') +
-        cell('cloud', (w.cloud == null ? '–' : w.cloud + '%')) + cell('PM2.5', w.pm25 == null ? '–' : w.pm25 + ' µg') + '</div><p class="sub" style="margin-top:12px">updated ' + (w.at ? ago(w.at) : '') + '</p>'; }],
-    ['hourly', () => (S.weather ? S.weather.hours : []).map((h) => '<div class="item">' + ico(skyIcon(h.sky, h.day)) + '<div class="grow"><div class="t">' + esc(h.label) + '</div>' +
-      (h.rain ? '<div class="s">rain ' + h.rain + '%</div>' : '') + '</div><div class="r" style="font-weight:300;font-size:28px">' + h.temp + '°</div></div>').join('') || none('No forecast yet')],
-    ['week', () => (S.weather ? S.weather.days : []).map((d, i) => '<div class="item">' + ico(skyIcon(d.sky, true)) + '<div class="grow"><div class="t">' + (i === 0 ? 'today' : esc(d.day)) + ' <span class="faint">' + esc(d.date) +
-      '</span></div><div class="s">' + esc(d.condition || '') + (d.rain ? ' · rain ' + d.rain + '%' : '') + '</div></div><div class="r" style="font-weight:300;font-size:26px">' + d.high + '° <span class="faint">' + d.low + '°</span></div></div>').join('') || none('No forecast yet')],
-  ].concat((S.cities || []).map((c) => [c.city.toLowerCase(), () => cityPanel(c)])) },
+  weather: { name: 'weather', items: () => [['cities', cityCards]] },
+  // one city in full: swipe between now, the hours, the week and the details
+  city: { get name() { const c = cityOf(page && page.show); return c ? c.city.toLowerCase() : 'weather'; }, items: () => { const c = cityOf(page.show); if (!c) return [['', () => none('No weather yet')]];
+    return [['now', () => cityNow(c)], ['hourly', () => cityHours(c)], ['week', () => cityWeek(c)], ['details', () => cityDetails(c)]]; } },
   bayern: { name: 'bayern', items: () => [
     ['next', () => S.bayern ? matchBlock(S.bayern.live || S.bayern.next, C.red) + list(S.bayern.fixtures.slice(S.bayern.live ? 0 : 1), 'coming up') : none('No matches yet')],
     ['results', () => S.bayern ? list(S.bayern.results, null, true) : none('No results yet')],
@@ -1143,6 +1226,7 @@ const PAGES = {
   ] },
   apps: { name: 'apps', items: () => [['on the tv', () => '<div class="apps">' + (S.apps || []).map((a) => '<div class="app" data-launch="' + esc(a.pkg) + '"><img ' + (AWAY ? 'data-icon="' + esc(a.pkg) + '"' : 'src="/api/icon?code=' + encodeURIComponent(code) + '&pkg=' +
     encodeURIComponent(a.pkg) + '"') + ' alt="" loading="lazy"><span>' + esc(a.label) + '</span></div>').join('') + '</div>' || none('No apps')]] },
+  search: { name: 'search', items: () => [['everything', searchPage]] },
   timer: { name: 'timer', items: () => [['timer', () => { const t = S.timer || {};
     const left = t.phase === 'Running' ? Math.max(0, t.left - (Date.now() - seen)) : t.left || 0;
     const mm = Math.floor(left / 60000), ss = Math.floor(left / 1000) % 60;
@@ -1323,6 +1407,7 @@ function wireAnywhere(panel) {
 }
 function wire(panel) {
   wireAnywhere(panel);
+  wireSearch(panel);
   panel.querySelectorAll('[data-k]').forEach((b) => {
     let rep = null;
     const go = () => key(b.dataset.k);
@@ -1921,6 +2006,93 @@ function refreshNow() {
   addEventListener('touchcancel', () => { y0 = null; reset(); }, { passive: true });
 })();
 
+/* ---------------------------------------------------------------- search: everything Metro knows */
+// As you type: the pages, the TV's apps, the games (Bayern's, Germany's, the cricket, today's), the news, the radio's
+// stations, the cities; then the TV's catalogue for films and series. Each answer does what it says.
+const PAGE_WORDS = {
+  weather: 'weather forecast rain temperature hot humidity uv sunrise sunset', bayern: 'bayern football soccer bundesliga champions league germany table scorers',
+  cricket: 'cricket sri lanka india scores test odi t20 rankings scorecard', money: 'money rupee rupees lkr inr gold fuel petrol exchange rate convert dirham aed',
+  news: 'news headlines stories', calendar: 'calendar holidays events dates month', clocks: 'clocks time world zones', verse: 'verse bible scripture',
+  notes: 'notifications', films: 'films movies series shows netflix prime shahid top 10', radio: 'radio stations music listen', youtube: 'youtube videos',
+  settings: 'settings accent colour color night alerts anywhere pair key', remote: 'remote keys inputs hdmi type power on off volume mute', apps: 'apps launch',
+  timer: 'timer countdown minutes', photos: 'photos pictures images send', ac: 'air con ac aircon cool schedules press',
+};
+let everyList = [];
+function everything(words) {
+  const w = words.toLowerCase().trim(), has = (x) => String(x || '').toLowerCase().includes(w);
+  const out = [];
+  const add = (g, t, s, ic, go) => { everyList.push(go); out.push({ g, t, s, ic, i: everyList.length - 1 }); };
+  everyList = [];
+  Object.keys(PAGE_WORDS).filter((k) => PAGES[k] && (has(PAGES[k].name) || PAGE_WORDS[k].split(' ').some((x) => x.startsWith(w))))
+    .slice(0, 5).forEach((k) => add('pages', PAGES[k].name, 'open', 'grid', () => open(k, 0)));
+  (S.apps || []).filter((a) => has(a.label)).slice(0, 6).forEach((a) => add('apps on the TV', a.label, 'opens on the TV', 'tv', () => act('launch', q('pkg', a.pkg))));
+  const seenG = new Set(), b = S.bayern || {}, de = S.germany || {};
+  [].concat(S.live || [], S.cricket || [], b.live ? [b.live] : [], b.fixtures || [], b.results || [], de.fixtures || [], de.results || [], S.games || [])
+    .filter((g) => g && g.home && !seenG.has(g.id) && seenG.add(g.id) && (has(g.home.name) || has(g.away.name) || has(g.league)))
+    .slice(0, 8).forEach((g) => add('games', g.home.name + ' v ' + g.away.name, [g.league, g.state === 'pre' ? dayOf(g.start) + ' ' + hm(g.start) : g.home.score + '–' + g.away.score + ' · ' + g.status].join(' · '),
+      g.sport === 'Cricket' ? 'trophy' : 'trophy', () => openGame(g)));
+  const seenN = new Set(), tn = S.teamNews || {};
+  [].concat((tn.bayern || []).map((n) => Object.assign({ espn: 1 }, n)), (tn.germany || []).map((n) => Object.assign({ espn: 1 }, n)), S.news || [], ...((feeds && feeds.sections) || []).map((sec) => sec.stories))
+    .filter((n) => n && n.title && !seenN.has(n.title) && seenN.add(n.title) && (has(n.title) || has(n.summary || n.text)))
+    .slice(0, 8).forEach((n) => add('news', n.title, [n.source || n.by || 'ESPN', storyAgo(n) || (n.at ? ago(n.at) : '')].filter(Boolean).join(' · '), 'chat',
+      () => (n.espn ? open('story', 0, n) : open('news', 0))));
+  ((S.radio && S.radio.rows) || []).forEach((row) => row.stations.filter((st) => has(st.name) || has(st.line)).forEach((st) =>
+    out.length < 60 && add('radio', st.name, 'plays on the TV · ' + (st.line || row.title), 'radio', () => act('radio', q('id', st.id)))));
+  const cities = [].concat(S.weather ? [S.weather] : [], S.cities || []);
+  cities.forEach((c, i) => { if (has(c.city)) add('weather', c.city, c.temp + '° · ' + String(c.condition || '').toLowerCase(), 'sun', () => open('city', 0, i)); });
+  (S.clocks || []).filter((c) => has(c.city)).slice(0, 4).forEach((c) => add('clocks', c.city, c.time + ' · ' + c.day, 'clock', () => open('clocks', 0)));
+  return out;
+}
+const RECENT = 'metro-searches';
+const recentSearches = () => { try { return JSON.parse(localStorage.getItem(RECENT) || '[]'); } catch (e) { return []; } };
+function rememberSearch(w) { try { localStorage.setItem(RECENT, JSON.stringify([w].concat(recentSearches().filter((x) => x.toLowerCase() !== w.toLowerCase())).slice(0, 8))); } catch (e) { } }
+function searchPage() {
+  const r = recentSearches();
+  return '<div class="row" style="margin-top:4px"><input id="every" type="search" placeholder="films, apps, teams, news, stations…" enterkeyhint="search" autocomplete="off" autocapitalize="off" spellcheck="false"></div>' +
+    '<div id="everyout">' + (r.length ? '<div class="sec">lately</div><div class="chips">' + r.map((x) => '<button class="chip" data-again="' + esc(x) + '">' + esc(x) + '</button>').join('') + '</div>' :
+    '<p class="sub" style="margin-top:14px">Everything Metro knows: the pages, the TV\'s apps, the games, the news, the radio, the cities; and every film and series, with where it streams.</p>') + '</div>';
+}
+function wireSearch(panel) {
+  const input = panel.querySelector('#every');
+  if (!input) return;
+  const box = panel.querySelector('#everyout');
+  let tLocal = 0, tFilms = 0, asked = '';
+  const draw = (words, films, note) => {
+    const local = everything(words);
+    const groups = [];
+    local.forEach((x) => { let g = groups.find((y) => y.g === x.g); if (!g) groups.push(g = { g: x.g, l: [] }); g.l.push(x); });
+    let html = groups.map((g) => '<div class="sec">' + esc(g.g) + '</div>' + g.l.map((x) => '<div class="item tap" data-every="' + x.i + '"><span class="eic">' + ico(x.ic) + '</span><div class="grow"><div class="t ellip">' +
+      esc(x.t) + '</div><div class="s ellip">' + esc(x.s) + '</div></div>' + chev + '</div>').join('')).join('');
+    if (films && films.length) {
+      const base = picked.length;
+      films.forEach((t) => picked.push(t));
+      html += '<div class="sec">films and series</div>' + films.map((t, i) => '<div class="item tap" data-t="' + (base + i) + '"><img class="thumb" src="' + esc(t.poster) + '" alt="" loading="lazy"><div class="grow"><div class="t">' +
+        esc(t.title) + '</div><div class="s">' + esc([t.kind, t.year, (t.genres || [])[0]].filter(Boolean).join(' · ')) + '</div>' + (t.svc ? '<div class="s">' + svcTag(t) + '</div>' : '') + '</div>' + chev + '</div>').join('');
+    }
+    box.innerHTML = (html || '') + (note ? '<p class="sub" style="margin-top:12px">' + esc(note) + '</p>' : '') || none('Nothing for “' + words + '”');
+    box.querySelectorAll('[data-every]').forEach((el) => { press(el); el.onclick = () => { rememberSearch(words); const go = everyList[+el.dataset.every]; if (go) go(); }; });
+    box.querySelectorAll('[data-t]').forEach((el) => { press(el); el.onclick = () => { rememberSearch(words); openTitle(picked[+el.dataset.t]); }; });
+  };
+  const run = () => {
+    const words = input.value.trim();
+    clearTimeout(tLocal); clearTimeout(tFilms);
+    if (words.length < 2) { box.innerHTML = words ? '' : searchPage().replace(/^[\s\S]*?<div id="everyout">/, '').replace(/<\/div>$/, ''); wireAgain(); return; }
+    tLocal = setTimeout(() => draw(words, null, 'looking in the TV\'s catalogue…'), 120);
+    tFilms = setTimeout(async () => {
+      asked = words;
+      const j = await call('find', q('q', words), 15000).catch(() => null);
+      if (asked !== words || input.value.trim() !== words) return;
+      draw(words, j && j.ok ? j.items : null, j && j.ok ? (j.items.length ? '' : '') : 'Films and series come from the TV: it didn\'t answer');
+    }, 550);
+  };
+  const wireAgain = () => box.querySelectorAll('[data-again]').forEach((c) => (c.onclick = () => { input.value = c.dataset.again; run(); }));
+  input.addEventListener('input', run);
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { input.blur(); if (input.value.trim().length > 1) rememberSearch(input.value.trim()); } });
+  wireAgain();
+  // straight in: the keyboard comes up with the page (the tap that opened it lets the phone show it)
+  try { input.focus({ preventScroll: true }); } catch (e) { }
+}
+
 /* ---------------------------------------------------------------- live */
 // What is playing, the radio, the AC, the timer and the notifications, every four seconds while the app is open:
 // only what changed is drawn again (the tiles that show it on Start; the page's item that shows it).
@@ -1929,7 +2101,7 @@ async function live() {
   if (document.hidden || !S || (!code && !AWAY)) return;
   const j = await call('live', '', 5000).catch(() => null);
   if (!j || j.need) return;
-  offline(false); seen = Date.now();
+  fine(); seen = Date.now();
   const sig = JSON.stringify(j);
   if (sig === liveSig) return;
   const first = !liveSig;
@@ -1960,7 +2132,7 @@ async function boot() {
   getFeeds();
   if (AWAY) { if (!(await Relay.ready())) return pairGate(); Relay.fonts(); }
   const j = await call('hello', '', AWAY ? 9000 : 6000).catch(() => null);
-  if (!j) { offline(true); if (!S) load(); cloud(); return; }
+  if (!j) { offline(true); setTimeout(load, 3000); cloud(); return; }
   if (j.need) gate(); else load();
 }
 (async () => {
