@@ -50,14 +50,22 @@ const Relay = (() => {
   const waiting = new Map(), icons = new Map();
   // both brokers at once: everything is sent on each (the TV and the hub take a message once, by its one-off number),
   // so whichever the hub is on, and the faster of the two, answers
-  const conns = BROKERS.map((url, n) => ({ url, n, ws: null, up: null, buf: new Uint8Array(0), ping: 0, live: false }));
+  const conns = BROKERS.map((url, n) => ({ url, n, ws: null, up: null, buf: new Uint8Array(0), ping: 0, live: false, heard: 0 }));
   const R = { onState: null, get on() { return conns.some((c) => c.live); }, get via() { return conns.filter((c) => c.live).map((c) => NAMES[c.n]).join(' and ') || 'none'; } };
 
   // the key: from the pairing link (#pair=…), or pasted; kept on this phone only
-  R.take = (k) => { k = String(k || '').trim().replace(/^.*pair=/, ''); if (!/^[A-Za-z0-9_-]{43}$/.test(k)) return false; store('metro-key', k); key = null; return true; };
-  R.forget = () => { store('metro-key', null); store('metro-state', null); key = null; conns.forEach((c) => { try { c.ws && c.ws.close(); } catch (e) { } }); };
+  R.take = (k) => { k = String(k || '').trim().replace(/^.*pair=/, ''); if (!/^[A-Za-z0-9_-]{43}$/.test(k)) return false; store('metro-key', k); key = null; readying = null; return true; };
+  R.forget = () => { store('metro-key', null); store('metro-state', null); key = null; readying = null; conns.forEach((c) => { try { c.ws && c.ws.close(); } catch (e) { } }); };
   R.paired = () => !!kept('metro-key') || /pair=[A-Za-z0-9_-]{43}/.test(location.hash);
-  async function ready() {
+  // made once, however many ask at once (at the start, the fonts, the first answer and the state all do): each
+  // making its own would give this phone more than one address for its answers
+  let readying = null;
+  function ready() {
+    if (key) return Promise.resolve(true);
+    if (!readying) readying = prepare().then((ok) => { if (!ok) readying = null; return ok; }, (e) => { readying = null; throw e; });
+    return readying;
+  }
+  async function prepare() {
     if (key) return true;
     const m = location.hash.match(/pair=([A-Za-z0-9_-]{43})/);
     if (m) { store('metro-key', m[1]); if (navigator.standalone) history.replaceState(null, '', location.pathname); }
@@ -85,7 +93,7 @@ const Relay = (() => {
       const give = (e) => { if (done) return; done = true; clearTimeout(t); if (e) no(e); else { c.live = true; ok(c); } };
       const t = setTimeout(() => { drop(c, s); try { s.close(); } catch (e) { } give(new Error('slow')); }, 8000);
       s.onopen = () => s.send(packet(0x10, cat(str('MQTT'), new Uint8Array([4, 2, 0, 60]), str('metro-ph-' + hex(rand(6))))));
-      s.onmessage = (e) => { c.buf = cat(c.buf, new Uint8Array(e.data)); parse(c, s, give); };
+      s.onmessage = (e) => { c.heard = Date.now(); c.buf = cat(c.buf, new Uint8Array(e.data)); parse(c, s, give); };
       s.onclose = s.onerror = () => { drop(c, s); give(new Error('closed')); };
       c.ws = s;
     });
@@ -105,7 +113,9 @@ const Relay = (() => {
         if (body[1] !== 0) { s.close(); continue; }
         s.send(packet(0x82, cat(new Uint8Array([0, 1]), str(base + '/ph/' + me), new Uint8Array([0]), str(base + '/state'), new Uint8Array([0]))));
         clearInterval(c.ping);
-        c.ping = setInterval(() => { try { s.send(new Uint8Array([0xc0, 0])); } catch (e) { } }, 25000);
+        // a ping every 25 s, answered by the broker: a link that has heard nothing for 65 s is dead (a phone closes
+        // them quietly in the background), so it is closed and made again
+        c.ping = setInterval(() => { if (Date.now() - c.heard > 65000) { try { s.close(); } catch (e) { } drop(c, s); return; } try { s.send(new Uint8Array([0xc0, 0])); } catch (e) { } }, 25000);
         give();
       } else if (type >> 4 === 3) {
         const tl = (body[0] << 8) | body[1];
@@ -192,12 +202,27 @@ const Relay = (() => {
       } catch (e) { }
     }));
   };
-  R.wake = () => { if (key) conns.forEach((c) => { if (!c.up) link(c); }); };
+  // back from the background: a link quiet for over 30 s may be gone without a word, so it is made again
+  R.wake = () => {
+    if (!key) return;
+    conns.forEach((c) => {
+      if (c.live && Date.now() - c.heard > 30000) { const s = c.ws; try { s && s.close(); } catch (e) { } drop(c, s); }
+      if (!c.up) link(c);
+    });
+  };
   return R;
 })();
+let busyN = 0, busyT = 0;
+function busy(pr) {
+  busyN++;
+  clearTimeout(busyT);
+  busyT = setTimeout(() => { if (busyN) $('#dots').classList.add('on'); }, 250);
+  const done = () => { busyN = Math.max(0, busyN - 1); if (!busyN) { clearTimeout(busyT); $('#dots').classList.remove('on'); } };
+  return Promise.resolve(pr).then((v) => { done(); return v; }, (e) => { done(); throw e; });
+}
 async function act(p, a, quiet) {
   try {
-    const j = await call(p, a);
+    const j = await (p === 'key' ? call(p, a) : busy(call(p, a)));
     if (j.need) return gate();
     if (!quiet || !j.ok) toast(j.line || (j.ok ? 'Done' : "That didn't work"));
     return j;
@@ -299,8 +324,19 @@ function spark(arr) {
   return '<svg class="spark" viewBox="0 0 300 70" preserveAspectRatio="none"><polyline points="' + pts + '" stroke-width="2.5" vector-effect="non-scaling-stroke"/></svg>';
 }
 function press(el) {
-  el.addEventListener('touchstart', () => el.classList.add('press'), { passive: true });
-  ['touchend', 'touchcancel', 'touchmove'].forEach((e) => el.addEventListener(e, () => el.classList.remove('press'), { passive: true }));
+  let t = 0, x = 0, y = 0, moved = false;
+  const off = () => { clearTimeout(t); t = 0; el.classList.remove('press'); };
+  el.addEventListener('touchstart', (e) => {
+    off(); moved = false;
+    x = e.touches[0].clientX; y = e.touches[0].clientY;
+    t = setTimeout(() => { if (!moved) el.classList.add('press'); }, 110);
+  }, { passive: true });
+  el.addEventListener('touchmove', (e) => {
+    if (Math.abs(e.touches[0].clientX - x) > 6 || Math.abs(e.touches[0].clientY - y) > 6) { moved = true; off(); }
+  }, { passive: true });
+  // a quick tap still answers: a brief press as it lifts
+  el.addEventListener('touchend', () => { clearTimeout(t); if (!moved) { el.classList.add('press'); setTimeout(off, 120); } else off(); }, { passive: true });
+  el.addEventListener('touchcancel', off, { passive: true });
 }
 
 /* ---------------------------------------------------------------- glyphs (Lucide, ISC) */
@@ -374,9 +410,33 @@ function greeting() {
   return h < 5 ? 'good night' : h < 12 ? 'good morning' : h < 17 ? 'good afternoon' : h < 22 ? 'good evening' : 'good night';
 }
 function drawStatus() {
-  const w = S && S.weather;
-  $('#status').innerHTML = (w ? ico(skyIcon(w.sky, w.day)) + '<span>' + w.temp + '°</span>' : '') + '<span class="t">' + hm(Date.now()) + '</span>';
+  const w = S && S.weather, tv = S && S.tv;
+  // the TV at a glance: lit when it is off (a tap turns it on), quiet when on (a tap opens the remote)
+  const off = tv && tv.on === false;
+  $('#status').innerHTML = (tv ? '<button class="tvst' + (off ? ' off' : '') + '" ' + (off ? 'data-power="on"' : 'data-tvremote') + ' aria-label="' + (off ? 'Turn the TV on' : 'The remote') + '">' +
+    ico('tv') + (off ? '<span>off</span>' : '') + '</button>' : '') + (w ? ico(skyIcon(w.sky, w.day)) + '<span>' + w.temp + '°</span>' : '') + '<span class="t">' + hm(Date.now()) + '</span>';
 }
+// the TV's power row, on the remote: whether it is on and what it shows, and the key that turns it on or off
+function tvPower() {
+  const tv = (S && S.tv) || {}, on = tv.on !== false, p = S && S.playing;
+  const what = on ? (p ? p.title + ' · ' + p.app : tv.away ? 'on another input' : tv.metro ? 'Metro on the screen' : '') : 'the Streamer wakes it';
+  return '<div class="tvpow' + (on ? '' : ' off') + '">' + ico(p && on ? 'music' : 'tv') + '<div class="grow"><div class="t">' + (on ? 'the TV is on' : 'the TV is off') + '</div>' +
+    (what ? '<div class="s">' + esc(what) + '</div>' : '') + '</div><button class="pw' + (on ? '' : ' go') + '" data-power="' + (on ? 'off' : 'on') + '">' + ico('power') + (on ? 'off' : 'turn on') + '</button></div>';
+}
+// the power key, wherever it shows; the state changes at once here, and the TV confirms it within seconds
+document.addEventListener('click', async (e) => {
+  if (e.target.closest('[data-tvremote]')) return open('remote', 0);
+  const b = e.target.closest('[data-power]');
+  if (!b || b.classList.contains('busy')) return;
+  const on = b.dataset.power === 'on';
+  b.classList.add('busy');
+  const j = await act('power', q('do', b.dataset.power));
+  b.classList.remove('busy');
+  if (!j || !j.ok || !S) return;
+  S.tv = Object.assign({}, S.tv, { on });
+  drawStatus();
+  if (page && page.id === 'remote' && pivot) redrawPanel(pivot.at);
+});
 
 // the hero's slides: the film at No. 1, Bayern's match, the cricket, the weather, the rupee; the phone scrolls them
 function slides() {
@@ -510,7 +570,7 @@ function stripMove(el, spans, n, loop, f, glide) {
   el.style.transition = glide ? GLIDE : 'none';
   el.style.transform = 'translate3d(' + (-(A.offsetLeft + (B.offsetLeft - A.offsetLeft) * k)) + 'px,0,0)';
 }
-function stripOn(spans, n, loop, at) { spans.forEach((s, j) => s.classList.toggle('on', j === (loop ? n : 0) + at)); }
+function stripOn(spans, n, loop, at) { spans.forEach((s, j) => s.classList.toggle('on', loop ? j % n === at : j === at)); }
 
 let heroL = [], heroPv = null, heroSpans = [], heroAt = 0, heroGrab = 0;
 const HERO_MS = 7000;
@@ -542,9 +602,9 @@ function drawHero() {
 }
 // the line under the current name fills over the slide's time (drawn by the phone, not ticked)
 function heroTime() {
-  const on = document.querySelector('#hstrip span.on');
+  const on = [...document.querySelectorAll('#hstrip span.on')];
   document.querySelectorAll('#hstrip span').forEach((s) => s.classList.remove('run'));
-  if (on) { void on.offsetWidth; on.classList.add('run'); }
+  if (on.length) { void on[0].offsetWidth; on.forEach((s) => s.classList.add('run')); }
   clearTimeout(heroTime.t);
   heroTime.t = setTimeout(() => {
     if (page || document.hidden || !heroPv || Date.now() - heroGrab < 4000) return heroTime();
@@ -684,6 +744,17 @@ function flips(T) {
     tileAt[k] = next;
   }, 2600);
 }
+// the first Start after the app opens turns in, a part after another (what is below the screen isn't waited for)
+let launched = false;
+function launchIn() {
+  if (launched) return;
+  launched = true;
+  const els = ['#aura', '#start .top'].map((q) => $(q)).concat([...document.querySelectorAll('#startBody > *:not(#tiles), #tiles > .tile')])
+    .filter((e) => e && e.getBoundingClientRect().top < innerHeight + 40).slice(0, 18);
+  els.forEach((e, i) => { e.style.setProperty('--li', i); e.classList.add('lin'); });
+  const bar = $('#bar'); bar.classList.add('lin');
+  setTimeout(() => { els.concat([bar]).forEach((e) => e.classList.remove('lin')); }, 1500);
+}
 function drawStart() {
   drawStatus();
   const T = tiles();
@@ -705,6 +776,7 @@ function drawStart() {
   document.querySelectorAll('#startBody [data-t]').forEach((el) => { press(el); el.onclick = () => openTitle(picked[+el.dataset.t]); });
   document.querySelectorAll('#startBody [data-films]').forEach((el) => (el.onclick = () => open('films', +el.dataset.films)));
   drawHero();
+  if (!launched && S) requestAnimationFrame(launchIn);
   $('#foot').textContent = 'From your TV · Metro ' + (S.version || '') + '. On an iPhone, Share › Add to Home Screen makes this an app.';
   drawBar();
   flips(T);
@@ -848,7 +920,14 @@ function formBlock(name, logo, f) {
 const ordinal = (n) => (n % 100 >= 11 && n % 100 <= 13) ? 'th' : ({ 1: 'st', 2: 'nd', 3: 'rd' })[n % 10] || 'th';
 function matchItems() {
   const g = page.show, d = page.data;
-  if (!d) { setTimeout(loadMatch, 0); return [[g.sport === 'Cricket' ? 'scorecard' : 'summary', () => matchHead(g) + '<div class="skel" style="height:120px;margin-top:16px"></div><p class="sub">getting the match from the TV…</p>']]; }
+  if (!d) {
+    setTimeout(loadMatch, 0);
+    const wait = '<div class="skel" style="height:44px;margin-top:16px"></div><div class="skel" style="height:220px;margin-top:8px"></div>';
+    if (g.sport === 'Cricket') return [['scorecard', () => '<div class="band" style="--c:' + C.steel + '"><div class="t-k">' + esc(g.league) + '</div><div class="mid" style="font-size:24px;margin-top:4px">' +
+      esc(g.detail || g.home.name + ' v ' + g.away.name) + '</div>' + [g.home, g.away].map((s) => '<div class="cside">' + crest(s.logo, '') + '<span class="nm">' + esc(s.name) + '</span><span class="sc">' + esc(s.score || '') + '</span></div>').join('') +
+      '<div class="t-line" style="margin-top:6px">' + esc(g.note || g.status) + '</div></div>' + wait]];
+    return [['summary', () => matchHead(g) + wait]];
+  }
   if (g.sport === 'Cricket') return [['scorecard', () => scorecard(d)]];
   const G = d.game || g;
   // in the order they happened: half time after 45 and its added minutes, 90'+2' as 92
@@ -1051,8 +1130,7 @@ const PAGES = {
     ['anywhere', () => anywhere()]];
   } },
   remote: { name: 'remote', items: () => [
-    ['remote', () => (S && S.playing ? '<div class="playing">' + ico('music') + '<div style="min-width:0;flex:1"><div class="ellip">' + esc(S.playing.title) + '</div><div class="sub ellip" style="font-size:13px">' +
-      esc(S.playing.app) + '</div></div></div>' : '') + '<div class="touch" id="touch">swipe to move · tap for OK</div><div class="pad">' +
+    ['remote', () => tvPower() + '<div class="touch" id="touch">swipe to move · tap for OK</div><div class="pad">' +
       '<button class="blank"></button>' + padBtn('up') + '<button class="blank"></button>' + padBtn('left') + '<button class="ok" data-k="ok">OK</button>' + padBtn('right') +
       '<button class="blank"></button>' + padBtn('down') + '<button class="blank"></button></div><div class="keys">' +
       keyBtn('back', 'back') + keyBtn('home', 'home') + '<button data-quick>' + ico('sliders') + 'quick</button>' + keyBtn('play', 'play') +
@@ -1147,9 +1225,15 @@ function drawPage(enter) {
   const box = $('#panels');
   box.classList.add('pv');
   box.classList.toggle('still', !enter);
-  pivot = new Pivot(box, items.map((it) => it[1]()), {
+  pivot = new Pivot(box, items.map((it) => safeDraw(it[1])), {
     at: page.at,
-    onMove: (f, glide) => { stripMove($('#strip'), spans, n, loop, f, glide); $('#pano').style.transition = glide ? GLIDE : 'none'; $('#pano').style.transform = 'translate3d(' + (-f * 40) + 'px,0,0)'; },
+    onMove: (f, glide) => {
+      stripMove($('#strip'), spans, n, loop, f, glide);
+      const pano = $('#pano'), wrap = !glide && Math.abs(f - (pano.f || 0)) > 1.5;
+      pano.f = f;
+      pano.style.transition = glide || wrap ? GLIDE : 'none';
+      pano.style.transform = 'translate3d(' + (-f * 40) + 'px,0,0)';
+    },
     // a glide can end after the page was left (Back straight after a swipe): nothing to mark then
     onAt: (i) => { if (page) page.at = i; stripOn(spans, n, loop, i); },
     onChange: (i) => { if (!page || !pivot) return; page.at = i; const pn = pivot.panel(i); if (pn) pn.scrollTop = pn.scrollTop; },
@@ -1157,9 +1241,12 @@ function drawPage(enter) {
   stripOn(spans, n, loop, pivot.at);
   spans.forEach((sp) => (sp.onclick = () => pivot.to(+sp.dataset.at)));
   if (enter) { const pg = $('#page'); pg.classList.remove('in'); void pg.offsetWidth; pg.classList.add('in'); }
-  pivot.panels().forEach(wire);
+  pivot.panels().forEach((pn) => { try { wire(pn); } catch (e) { console.error(e); } });
   drawBar();
   ticking();
+}
+function safeDraw(fn) {
+  try { return fn(); } catch (e) { console.error(e); return none("This part couldn't be drawn just now: pull down to try again"); }
 }
 // one item again (what is playing changed, a timer started): only that panel is drawn anew
 function redrawPanel(i) {
@@ -1169,7 +1256,7 @@ function redrawPanel(i) {
   if (!it || !pn) return;
   const top = pn.scrollTop;
   picked = picked.slice(0);
-  pn.innerHTML = it[1]();
+  pn.innerHTML = safeDraw(it[1]);
   pn.scrollTop = top;
   wire(pn);
 }
@@ -1386,7 +1473,7 @@ function drawBar() {
     const f = x.dataset.b;
     if (f === 'back') history.back();
     else if (f === 'tv') { if (id === 'title') act('show', q('id', page.show.id)); else act('open', q('what', TV[id])); }
-    else if (f === 'refresh') { toast('Asking the TV…'); load(); }
+    else if (f === 'refresh') refreshNow();
     else if (page && page.id === f && pivot) pivot.to(0);
     else open(f, 0);
   }));
@@ -1802,6 +1889,38 @@ async function cloud() {
   else if (pivot && !['remote', 'title', 'photos', 'films', 'settings', 'money', 'timer', 'apps', 'match', 'story'].includes(page.id)) pivot.panels().forEach((_, i) => redrawPanel(i));
 }
 
+/* ---------------------------------------------------------------- pull to refresh */
+// Down from the top of Start or of a page's item: the word at the top says when to let go; then what is on show is
+// asked for again (a match its match, anything else the TV's whole state), with the dots while it comes.
+function refreshNow() {
+  if (page && page.id === 'match') return busy(loadMatch());
+  if (page && page.id === 'story') { page.data = null; return drawPage(false); }
+  lastSig = '';
+  return busy(load()).then(() => { if (page && pivot) pivot.panels().forEach((_, i) => redrawPanel(i)); });
+}
+(() => {
+  let y0 = null, x0 = 0, pulled = 0;
+  const pill = $('#pull');
+  const atTop = () => (page ? ((pivot && pivot.panel(pivot.at)) || {}).scrollTop || 0 : window.scrollY) <= 0;
+  const reset = () => { pulled = 0; pill.style.opacity = ''; pill.style.transform = ''; pill.classList.remove('ready'); };
+  addEventListener('touchstart', (e) => {
+    y0 = null;
+    if (e.touches.length !== 1 || !atTop() || !$('#gate').hidden || e.target.closest('.touch,.pad,.keys,input,textarea,select,#bar')) return;
+    y0 = e.touches[0].clientY; x0 = e.touches[0].clientX; pulled = 0;
+  }, { passive: true });
+  addEventListener('touchmove', (e) => {
+    if (y0 == null) return;
+    const dy = e.touches[0].clientY - y0, dx = e.touches[0].clientX - x0;
+    if (dy < 0 || Math.abs(dx) > Math.max(12, dy)) { y0 = null; reset(); return; }
+    pulled = dy;
+    pill.style.opacity = Math.min(1, dy / 80);
+    pill.style.transform = 'translateY(' + Math.min(dy * 0.35, 36) + 'px)';
+    pill.classList.toggle('ready', dy > 90);
+  }, { passive: true });
+  addEventListener('touchend', () => { if (y0 == null) return; const go = pulled > 90; y0 = null; reset(); if (go) refreshNow(); }, { passive: true });
+  addEventListener('touchcancel', () => { y0 = null; reset(); }, { passive: true });
+})();
+
 /* ---------------------------------------------------------------- live */
 // What is playing, the radio, the AC, the timer and the notifications, every four seconds while the app is open:
 // only what changed is drawn again (the tiles that show it on Start; the page's item that shows it).
@@ -1817,7 +1936,7 @@ async function live() {
   liveSig = sig;
   Object.assign(S, j);
   if (first) return;
-  if (!page) redrawTiles();
+  if (!page) { redrawTiles(); drawStatus(); }
   else if (['radio', 'remote', 'timer', 'notes', 'ac'].includes(page.id) && pivot) redrawPanel(pivot.at);
 }
 setInterval(live, 4000);
