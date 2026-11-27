@@ -13,7 +13,12 @@ const tileAt = {};      // each tile's face on show
 
 /* ---------------------------------------------------------------- talking to the TV */
 async function call(p, a, ms) {
-  if (AWAY) return Relay.call(p, a, ms);
+  if (AWAY) {
+    // a match, a scorecard or a story: from ESPN straight when the TV is off (or doesn't answer)
+    const cq = CLOUD[p] && Object.fromEntries(new URLSearchParams(a || ''));
+    if (cq && Date.now() - seen > 300000) return CLOUD[p](cq);
+    try { return await Relay.call(p, a, cq ? Math.min(ms || 12000, 8000) : ms); } catch (e) { if (cq) return CLOUD[p](cq); throw e; }
+  }
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), ms || 12000);
   try {
@@ -207,9 +212,10 @@ function toast(t) {
 function offline(on) {
   const o = $('#offline');
   o.hidden = !on;
-  if (on) o.textContent = (AWAY && !Relay.on ? 'Offline' : 'The TV is off') + (AWAY && cloudAt ? ' · the weather is live, the rest' : ' · showing what it said') +
-    (seen ? (cloudAt ? ' from ' : ' at ') + (Date.now() - seen > 864e5 ? dayOf(seen) + ' ' : '') + hm(seen) : ' last');
-  else cloudAt = 0;
+  const live = AWAY && (cloudAt || sportsAt);
+  if (on) o.textContent = (AWAY && !Relay.on ? 'Offline' : 'The TV is off') + (live ? ' · weather and scores live, the rest' : ' · showing what it said') +
+    (seen ? (live ? ' from ' : ' at ') + (Date.now() - seen > 864e5 ? dayOf(seen) + ' ' : '') + hm(seen) : ' last');
+  else { cloudAt = 0; sportsAt = 0; }
 }
 async function load() {
   try {
@@ -1106,8 +1112,9 @@ function drawPage(enter) {
   pivot = new Pivot(box, items.map((it) => it[1]()), {
     at: page.at,
     onMove: (f, glide) => { stripMove($('#strip'), spans, n, loop, f, glide); $('#pano').style.transition = glide ? GLIDE : 'none'; $('#pano').style.transform = 'translate3d(' + (-f * 40) + 'px,0,0)'; },
-    onAt: (i) => { page.at = i; stripOn(spans, n, loop, i); },
-    onChange: (i) => { page.at = i; const pn = pivot.panel(i); if (pn) pn.scrollTop = pn.scrollTop; },
+    // a glide can end after the page was left (Back straight after a swipe): nothing to mark then
+    onAt: (i) => { if (page) page.at = i; stripOn(spans, n, loop, i); },
+    onChange: (i) => { if (!page || !pivot) return; page.at = i; const pn = pivot.panel(i); if (pn) pn.scrollTop = pn.scrollTop; },
   });
   stripOn(spans, n, loop, pivot.at);
   spans.forEach((sp) => (sp.onclick = () => pivot.to(+sp.dataset.at)));
@@ -1347,6 +1354,363 @@ function drawBar() {
   }));
 }
 
+/* ---------------------------------------------------------------- scores and team news from the internet, with the TV off */
+// ESPN as the TV reads it (it lets a page ask it straight): every game today in the big leagues and the men's
+// internationals, Bayern's and Germany's next game, results and tables, their news, a match in full, a story, and Sri
+// Lanka's or India's scorecard. Away from home with the TV off, every two minutes while something is live, else ten.
+const ESPN = 'https://site.api.espn.com/apis/site/v2/sports/soccer';
+const ESPN_CRICKET = 'https://site.web.api.espn.com/apis';
+const LEAGUES = [['eng.1', 'Premier League'], ['ger.1', 'Bundesliga'], ['esp.1', 'LaLiga'], ['uefa.champions', 'Champions League'], ['ita.1', 'Serie A'],
+  ['ger.dfb_pokal', 'DFB-Pokal'], ['uefa.europa', 'Europa League'], ['fra.1', 'Ligue 1']];
+const NATIONS = ['India', 'Sri Lanka', 'Australia', 'England', 'South Africa', 'New Zealand', 'Pakistan', 'Bangladesh', 'West Indies', 'Afghanistan', 'Ireland',
+  'Zimbabwe', 'United Arab Emirates', 'Netherlands', 'Scotland', 'Nepal'];
+const CRICKET_LEAGUES = ['Indian Premier League', 'World Cup', 'Asia Cup', 'Champions Trophy'];
+const NOT_SENIOR = /under[- ]?\d\d|\bu-?\d\d\b|emerging|rising stars|legends|masters/i, YOUTH = /under[- ]?\d\d|\bu-?\d\d\b|legends|masters/i, A_TEAM = /\sA(\s|$)/;
+const STOPPED = /\b(stumps|lunch|tea|rain|bad light|innings break|delayed)\b/i;
+const OURS = ['Sri Lanka', 'India'];
+const ourSide = (n) => OURS.some((x) => n === x || n === x + ' A');
+const ourCricket = (g) => g.sport === 'Cricket' && (ourSide(g.home.name) || ourSide(g.away.name));
+const kept = new Map();
+// ESPN's answer, kept a while (a past or coming day's scoreboard for half an hour, today's for under a minute)
+async function espn(u, keepMs) {
+  const k = kept.get(u);
+  if (k && Date.now() - k[0] < (keepMs || 50000)) return k[1];
+  const r = await fetch(u);
+  if (!r.ok) throw new Error('ESPN ' + r.status);
+  const j = await r.json();
+  kept.set(u, [Date.now(), j]);
+  return j;
+}
+const dayIn = (ms) => new Date(ms).toLocaleDateString('en-CA', TZ);
+function kickoff(ms) {
+  const d = dayIn(ms);
+  return d === dayIn(Date.now()) ? 'Today ' + hm(ms) : d === dayIn(Date.now() + 864e5) ? 'Tomorrow ' + hm(ms) :
+    new Date(ms).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', ...TZ }) + ' · ' + hm(ms);
+}
+function whenLabel(ms) {
+  const d = dayIn(ms);
+  return (d === dayIn(Date.now()) ? 'Today' : d === dayIn(Date.now() + 864e5) ? 'Tomorrow' : new Date(ms).toLocaleDateString('en-GB', { weekday: 'short', ...TZ })) + ' ' + hm(ms);
+}
+const tidyLeague = (l) => { const s = String(l || '').replace(/^\d{4}([-/]\d{2,4})?\s+/, '');
+  return /Bundesliga/.test(s) ? 'Bundesliga' : /Champions League/.test(s) ? 'Champions League' : /German Cup|DFB/.test(s) ? 'DFB-Pokal' : /super ?cup/i.test(s) ? 'Supercup' :
+    /Club World Cup/.test(s) ? 'Club World Cup' : /friendl/i.test(s) ? 'Friendly' : s; };
+const unent = (s) => { if (!s || s.indexOf('&') < 0) return s || ''; const t = document.createElement('textarea'); t.innerHTML = s; return t.value; };
+const plainE = (s) => unent(s).trim().replace(/\binns\b/g, 'innings').replace(/\bwkts?\b/g, (w) => (w === 'wkt' ? 'wicket' : 'wickets'))
+  .replace(/\((\d+)b rem\)/g, (_, n) => (+n === 0 ? 'off the last ball' : 'with ' + n + ' ' + (+n === 1 ? 'ball' : 'balls') + ' to spare'));
+const shortScore = (s) => String(s || '').replace(/,\s*target \d+/, '').replace(/\/\d+ ov/, ' ov').trim();
+const gameOf = (o) => Object.assign({ leagueId: '', note: '', detail: '' }, o, { live: o.state === 'in' && !STOPPED.test(o.status) });
+function sideOf(o, club) {
+  const t = o.team || o;
+  const logo = (t.logos && t.logos[0] && t.logos[0].href) || t.logo || o.logo || '';
+  const score = o.score == null ? '' : typeof o.score === 'object' ? o.score.displayValue || '' : String(o.score);
+  const name = club && t.displayName === 'Bayern Munich' ? 'Bayern' : t.displayName || '';
+  return { name, short: (club ? t.shortDisplayName || t.abbreviation : t.shortDisplayName || t.abbreviation) || '', score, logo, color: t.color ? '#' + t.color : '' };
+}
+// one event of a team's schedule (as the TV's Bayern.game)
+function teamGame(e) {
+  const c = e.competitions[0], cs = c.competitors, h = cs.find((x) => x.homeAway === 'home'), a = cs.find((x) => x.homeAway === 'away');
+  const st = c.status || e.status, type = st.type, state = type.state, start = Date.parse(e.date);
+  const status = state === 'in' ? st.displayClock || type.shortDetail : state === 'post' ? type.shortDetail || 'FT' : kickoff(start);
+  return gameOf({ id: e.id, sport: 'Football', league: tidyLeague((e.league && e.league.name) || (e.season && e.season.displayName) || ''), home: sideOf(h, true), away: sideOf(a, true),
+    state, status, detail: (c.venue && c.venue.fullName) || '', start });
+}
+const events = (j) => (j.events || []).map((e) => { try { return teamGame(e); } catch (x) { return null; } }).filter(Boolean);
+
+// every game today: the leagues day by day (yesterday to four days on; the European nights yesterday to tomorrow), and cricket
+async function soccer(code, league) {
+  const days = code.startsWith('uefa.') ? [-1, 0, 1] : [-1, 0, 1, 2, 3, 4];
+  const boards = await Promise.all(days.map((d) => espn(ESPN + '/' + code + '/scoreboard?dates=' + new Date(Date.now() + d * 864e5).toISOString().slice(0, 10).replace(/-/g, ''), d === 0 ? 50000 : 1800000).catch(() => null)));
+  const out = [];
+  boards.filter(Boolean).forEach((b) => (b.events || []).forEach((e) => { try {
+    const c = e.competitions[0], h = c.competitors.find((x) => x.homeAway === 'home'), a = c.competitors.find((x) => x.homeAway === 'away');
+    const type = e.status.type, state = type.state, start = Date.parse(e.date);
+    const status = state === 'in' ? e.status.displayClock || type.shortDetail : state === 'post' ? type.shortDetail || 'FT' : whenLabel(start);
+    out.push(gameOf({ id: e.id, sport: 'Football', league, home: sideOf(h), away: sideOf(a), state, status, detail: (c.venue && c.venue.fullName) || '', start }));
+  } catch (x) { } }));
+  return out;
+}
+async function cricketGames() {
+  const j = await espn(ESPN_CRICKET + '/v2/scoreboard/header?sport=cricket&region=in&lang=en', 50000);
+  const out = [];
+  (j.sports[0].leagues || []).forEach((lg) => { const lname = lg.name || '';
+    (lg.events || []).forEach((e) => { try {
+      const cs = e.competitors || [];
+      if (cs.length < 2) return;
+      const names = cs.map((x) => x.displayName || '');
+      if (/women/i.test(lname) || names.some((n) => /women/i.test(n))) return;
+      const aSides = names.every((n) => A_TEAM.test(n) && NATIONS.includes(n.replace(/ A$/, '').trim()));
+      if (aSides) { if ([lname].concat(names).some((n) => YOUTH.test(n))) return; }
+      else if ([lname].concat(names).some((n) => NOT_SENIOR.test(n) || A_TEAM.test(n))) return;
+      if (!(aSides || names.every((n) => NATIONS.includes(n)) || CRICKET_LEAGUES.some((l) => lname.toLowerCase().includes(l.toLowerCase())))) return;
+      const side = (o) => ({ name: o.displayName || '', short: o.abbreviation || '', score: shortScore(o.score), logo: o.logo || '', color: o.color ? '#' + o.color : '' });
+      const h = cs.find((x) => x.homeAway === 'home') || cs[0], a = cs.find((x) => x.homeAway === 'away') || cs[1];
+      const state = e.status, start = Date.parse(e.date) || 0;
+      const status = state === 'pre' ? whenLabel(start) : e.summary || (state === 'post' ? 'Result' : 'Live');
+      const full = e.fullStatus || {};
+      const note = state === 'pre' ? '' : plainE(full.longSummary || full.summary || '');
+      out.push(gameOf({ id: e.id, sport: 'Cricket', league: lname.split(' 20')[0].trim(), home: side(h), away: side(a), state, status,
+        detail: [e.title || e.eventType || '', (e.location || '').split(', ').pop()].filter(Boolean).join(' · '), start, leagueId: String(lg.id || ''), note: note !== status ? note : '' }));
+    } catch (x) { } }); });
+  return out;
+}
+async function cloudGames() {
+  const all = (await Promise.all(LEAGUES.map(([c, n]) => soccer(c, n).catch(() => [])).concat([cricketGames().catch(() => [])]))).flat();
+  const now = Date.now(), seenIds = new Set();
+  const games = all.filter((g) => g.state === 'in' || (g.state === 'post' ? now - g.start < (g.sport === 'Cricket' ? 144 : 30) * 3600000 : g.start - now < (g.sport === 'Football' ? 5 : 4) * 864e5))
+    .filter((g) => !seenIds.has(g.id) && seenIds.add(g.id));
+  if (!games.length) return false;
+  const rank = (g) => (g.state === 'in' ? 0 : g.state === 'post' ? 1 : 2);
+  S.games = games.slice().sort((a, b) => (a.state !== 'in') - (b.state !== 'in') || a.league.localeCompare(b.league) || a.start - b.start).slice(0, 60);
+  S.live = games.filter((g) => g.state === 'in').slice(0, 12);
+  S.cricket = games.filter(ourCricket).sort((a, b) => a.start - b.start);
+  const ours = games.find((g) => ourCricket(g) && g.state === 'in') || games.filter((g) => ourCricket(g) && g.state === 'post').sort((a, b) => b.start - a.start)[0];
+  if (ours) { const sc = await cloudScorecard(ours.leagueId, ours.id, ours).catch(() => null); if (sc && sc.ok) S.scorecard = sc; }
+  return games.sort((a, b) => rank(a) - rank(b)).some((g) => g.live);
+}
+
+// Bayern (132) or Germany (481), as the TV's team page has it
+const outcome = (g, team) => { const us = g.home.name.includes(team) ? g.home : g.away, them = us === g.home ? g.away : g.home;
+  const a = parseInt(us.score, 10), b = parseInt(them.score, 10); return isNaN(a) || isNaN(b) ? '-' : a > b ? 'W' : a < b ? 'L' : 'D'; };
+async function espnTable(code, name) {
+  const j = await espn('https://site.api.espn.com/apis/v2/sports/soccer/' + code + '/standings', 600000);
+  const g = (j.children && j.children[0]) || j;
+  return { name, rows: g.standings.entries.map((e) => { const st = {}; (e.stats || []).forEach((s) => (st[s.name] = s));
+    const n = (k) => (st[k] && isFinite(st[k].value) ? Math.round(st[k].value) : 0);
+    const t = e.team, short = t.shortDisplayName === 'Bayern Munich' ? 'Bayern' : t.shortDisplayName || t.displayName;
+    return { rank: n('rank'), team: short, logo: (t.logos && t.logos[0] && t.logos[0].href) || '', played: n('gamesPlayed'), gd: (st.pointDifferential && st.pointDifferential.displayValue) || '',
+      points: n('points'), us: t.id === '132' }; }).sort((a, b) => a.rank - b.rank) };
+}
+async function espnLeaders() {
+  const j = await espn(ESPN + '/ger.1/teams/132/roster', 3600000);
+  const ps = (j.athletes || []).map((p) => { const st = {};
+    (((p.statistics || {}).splits || {}).categories || []).forEach((c) => (c.stats || []).forEach((s) => (st[s.name] = Math.round(s.value || 0))));
+    return { name: p.displayName, number: p.jersey || '', st }; });
+  const top = (k, what) => ps.filter((p) => p.st[k] > 0).sort((a, b) => b.st[k] - a.st[k]).slice(0, 3).map((p) => ({ what, name: p.name, number: p.number, value: p.st[k] }));
+  return top('totalGoals', 'Goals').concat(top('goalAssists', 'Assists'));
+}
+async function club(id, name) {
+  const year = new Date().getFullYear();
+  const fixtures = espn(ESPN + '/all/teams/' + id + '/schedule?fixture=true', 120000).then(events);
+  const results = id === '132' ? Promise.all(['ger.1', 'uefa.champions', 'ger.dfb_pokal'].map((c) => espn(ESPN + '/' + c + '/teams/132/schedule', 600000).then(events).catch(() => [])))
+    : Promise.all([year, year - 1].map((y) => espn(ESPN + '/all/teams/481/schedule?season=' + y, 600000).then(events).catch(() => [])));
+  const tables = id === '132' ? Promise.all([espnTable('ger.1', 'Bundesliga').catch(() => null), espnTable('uefa.champions', 'Champions League').catch(() => null)]) : Promise.resolve([]);
+  const lead = id === '132' ? espnLeaders().catch(() => []) : Promise.resolve([]);
+  let fx = (await fixtures).filter((g) => g.state !== 'post').sort((a, b) => a.start - b.start);
+  // around kick-off, the match's own summary has the live score
+  const near = fx.find((g) => g.live || (g.start - Date.now() < 600000 && Date.now() - g.start < 3 * 3600000));
+  if (near) { const m = await cloudMatch(near.id).catch(() => null); if (m && m.game) fx = fx.map((g) => (g.id === near.id ? m.game : g)).filter((g) => g.state !== 'post'); }
+  const seenIds = new Set();
+  const res = (await results).flat().filter((g) => g.state === 'post' && !seenIds.has(g.id) && seenIds.add(g.id)).sort((a, b) => b.start - a.start).slice(0, 8);
+  const tl = (await tables).filter(Boolean);
+  return { name, tables: tl, leaders: await lead, live: fx.find((g) => g.live) || null, next: fx.find((g) => g.state === 'pre') || null,
+    fixtures: fx.filter((g) => g.state === 'pre').slice(0, 6), results: res.slice(0, 6).map((g) => Object.assign({}, g, { outcome: outcome(g, name) })), table: tl[0] || null };
+}
+async function espnNews(id) {
+  const j = await espn(ESPN + '/all/news?limit=24&team=' + id, 1200000);
+  const seenT = new Set();
+  return (j.articles || []).filter((a) => a.type !== 'Media' && !a.premium && a.id && a.headline && !seenT.has(a.headline) && seenT.add(a.headline)).map((a) => {
+    const im = (a.images || []).find((x) => /\/photo\//.test(x.url || '')) || (a.images || [])[0];
+    return { id: String(a.id), title: a.headline.trim(), text: (a.description || '').trim(), image: (im && im.url) || '', at: Date.parse(a.published) || 0, by: (a.byline || '').trim() };
+  }).sort((a, b) => b.at - a.at).slice(0, 10);
+}
+async function cloudTeams() {
+  const [b, g, nb, ng] = await Promise.all([club('132', 'Bayern').catch(() => null), club('481', 'Germany').catch(() => null), espnNews('132').catch(() => null), espnNews('481').catch(() => null)]);
+  if (b) S.bayern = b;
+  if (g) S.germany = g;
+  if (nb || ng) S.teamNews = { bayern: nb || (S.teamNews || {}).bayern || [], germany: ng || (S.teamNews || {}).germany || [] };
+  return !!((b && b.live) || (g && g.live));
+}
+
+// a story in full: ESPN's text as paragraphs and headings
+async function cloudStory(id) {
+  const j = await espn('https://content.core.api.espn.com/v1/sports/news/' + encodeURIComponent(id), 86400000);
+  const html = (((j.headlines || [])[0]) || {}).story || '';
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const paras = [...doc.querySelectorAll('p, h2, h3, h4, li, blockquote')].filter((e) => !e.closest('li p, blockquote p') || e.tagName !== 'P')
+    .map((e) => ({ text: e.textContent.replace(/[ \t ]+/g, ' ').trim(), head: /^H/.test(e.tagName) })).filter((p) => p.text);
+  return { ok: paras.length > 0, paras };
+}
+
+// a football match in full, from ESPN's summary (the TV adds FotMob's ratings and photos; the phone has ESPN's alone)
+const STATS = [['possessionPct', 'possession'], ['totalShots', 'shots'], ['shotsOnTarget', 'shots on target'], ['wonCorners', 'corners'], ['saves', 'saves'], ['totalPasses', 'passes'],
+  ['totalTackles', 'tackles'], ['offsides', 'offsides'], ['foulsCommitted', 'fouls'], ['yellowCards', 'yellow cards'], ['redCards', 'red cards']];
+function kindOfPlay(type, text) {
+  const t = (type || '').toLowerCase();
+  if (t.includes('own-goal') || /^own goal/i.test(text)) return 'own';
+  if (t.startsWith('goal') || t === 'penalty---scored' || text.startsWith('Goal!')) return t.includes('penalty') || /penalty(?! area)/i.test(text) ? 'pen' : 'goal';
+  if (t.includes('red-card') || t.includes('second-yellow') || /second yellow/i.test(text) || (t.includes('card') && /red card/i.test(text))) return 'red';
+  if (t.includes('yellow-card')) return 'yellow';
+  if (t.startsWith('substitution')) return 'sub';
+  if (t.startsWith('var') || text.startsWith('VAR')) return 'var';
+  if (t === 'kickoff' || t === 'halftime' || ((t.startsWith('start-') || t.startsWith('end-')) && !t.includes('delay')) ||
+    (!t && /^(Match ends|First Half begins|Second Half begins)|minutes? of added time/.test(text))) return 'whistle';
+  if (/^(shot|attempt|penalty)|woodwork|post|bar/.test(t)) return 'chance';
+  return null;
+}
+// each side's colour for the bars, as the TV's: readable on black (else white), and told apart from the other's
+function tones(h, a) {
+  const rgb = (x) => { const m = /^#?([0-9a-f]{6})$/i.exec(x || ''); if (!m) return null; const n = parseInt(m[1], 16); return [(n >> 16) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255]; };
+  const lum = (c) => { const f = (v) => (v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)); return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]); };
+  const hex = (c) => '#' + c.map((v) => Math.round(v * 255).toString(16).padStart(2, '0')).join('');
+  const ok = (c) => c && lum(c) > 0.04 && hex(c) !== '#8b8fa3';
+  const near = (x, y) => Math.abs(x[0] - y[0]) + Math.abs(x[1] - y[1]) + Math.abs(x[2] - y[2]) < 0.5;
+  const W = [1, 1, 1], B = [0x1b / 255, 0xa1 / 255, 0xe2 / 255];
+  const home = ok(rgb(h)) ? rgb(h) : W;
+  let away = ok(rgb(a)) ? rgb(a) : W;
+  if (near(home, away)) away = near(home, W) ? B : W;
+  return [hex(home), hex(away)];
+}
+async function cloudMatch(id) {
+  const d = await espn(ESPN + '/all/summary?event=' + encodeURIComponent(id), 25000);
+  const header = d.header, comp = header.competitions[0], cs = comp.competitors;
+  const h = cs.find((x) => x.homeAway === 'home'), a = cs.find((x) => x.homeAway === 'away');
+  const homeId = h.team.id, awayId = a.team.id, st = comp.status, type = st.type, state = type.state;
+  const start = Date.parse(comp.date || header.date) || 0;
+  const status = state === 'in' ? st.displayClock || type.shortDetail : state === 'post' ? type.shortDetail || 'FT' : kickoff(start);
+  const venue = (((d.gameInfo || {}).venue) || {}).fullName || '';
+  const game = gameOf({ id: String(id), sport: 'Football', league: tidyLeague((header.league || {}).name), home: sideOf(h, true), away: sideOf(a, true), state, status, detail: venue, start });
+  const moments = (d.keyEvents || []).map((k) => {
+    const t = k.type || {}, text = t.text || '';
+    if (t.type === 'halftime') return { min: 'HT', kind: 'ht', who: '', extra: '', home: false };
+    const kind = /Own Goal/i.test(text) ? 'own' : /Penalty/i.test(text) && (k.scoringPlay || /Scored/i.test(text)) ? 'pen' : k.scoringPlay || text.startsWith('Goal') ? 'goal' :
+      /Red Card/i.test(text) ? 'red' : /Yellow Card/i.test(text) ? 'yellow' : /Substitution/i.test(text) ? 'sub' : null;
+    if (!kind) return null;
+    const who = (n) => ((((k.participants || [])[n] || {}).athlete) || {}).displayName || '';
+    return { min: (k.clock || {}).displayValue || '', kind, who: who(0), extra: who(1), home: (k.team || {}).id === homeId };
+  }).filter(Boolean);
+  const box = {};
+  ((d.boxscore || {}).teams || []).forEach((t) => { const side = t.homeAway || ((t.team || {}).id === homeId ? 'home' : 'away'); box[side] = {}; (t.statistics || []).forEach((s) => (box[side][s.name] = s.displayValue)); });
+  const hs = box.home || {}, as = box.away || {};
+  const num = (s) => parseFloat((/-?\d+(\.\d+)?/.exec(s || '') || [0])[0]) || 0;
+  const stats = state === 'pre' ? [] : STATS.filter(([k]) => hs[k] != null && as[k] != null).map(([k, label]) => {
+    const x = num(hs[k]), y = num(as[k]), pct = k === 'possessionPct';
+    if (label === 'red cards' && x + y === 0) return null;
+    return { label, home: pct ? Math.trunc(x) + '%' : hs[k], away: pct ? Math.trunc(y) + '%' : as[k], share: x + y ? x / (x + y) : 0.5 };
+  }).filter(Boolean);
+  const lineup = (side) => {
+    const r = (d.rosters || []).find((x) => x.homeAway === side);
+    if (!r) return null;
+    const mine = moments.filter((m) => m.home === (side === 'home'));
+    const last = {};
+    (r.roster || []).forEach((p) => p.athlete && (last[p.athlete.displayName] = p.athlete.lastName || ''));
+    const all = (r.roster || []).map((p) => {
+      const name = (p.athlete || {}).displayName || '', subIn = !!p.subbedIn, subOut = !!p.subbedOut;
+      const inFor = subIn ? ((mine.find((m) => m.kind === 'sub' && m.who === name) || {}).extra || '') : '';
+      const subAt = (off) => ((mine.find((m) => m.kind === 'sub' && (off ? m.extra : m.who) === name) || {}).min || '');
+      return { p: { n: p.jersey || '', name, pos: (p.position || {}).abbreviation || '', rating: '', goals: mine.filter((m) => (m.kind === 'goal' || m.kind === 'pen') && m.who === name).length,
+        card: mine.some((m) => m.kind === 'red' && m.who === name) ? 'red' : mine.some((m) => m.kind === 'yellow' && m.who === name) ? 'yellow' : '',
+        in: subIn, out: subOut, min: subIn ? subAt(false) : subOut ? subAt(true) : '', for: last[inFor] || inFor.split(' ').pop() }, starter: !!p.starter };
+    });
+    const xi = all.filter((x) => x.starter).map((x) => x.p);
+    if (xi.length < 10) return null;
+    return { formation: r.formation || '', coach: '', kind: 'Official', note: '', starters: xi, bench: all.filter((x) => !x.starter).map((x) => x.p).sort((p, q) => (q.in - p.in) || (parseInt(p.min, 10) || 0) - (parseInt(q.min, 10) || 0)) };
+  };
+  const rows = [];
+  (((d.standings || {}).groups) || []).forEach((g) => (((g.standings || {}).entries) || []).forEach((e) => rows.push(e)));
+  const facts = (teamId, bx) => {
+    const row = rows.find((r) => r.id === teamId), rs = {};
+    ((row || {}).stats || []).forEach((s) => (rs[s.name] = s.displayValue));
+    const l5 = (d.lastFiveGames || []).find((x) => (x.team || {}).id === teamId);
+    const form = ((l5 || {}).events || []).map((e) => { const home = e.homeTeamId === teamId, us = e[home ? 'homeTeamScore' : 'awayTeamScore'], them = e[home ? 'awayTeamScore' : 'homeTeamScore'];
+      return e.gameResult ? { r: e.gameResult[0], score: us !== '' && them !== '' && us != null && them != null ? us + '–' + them : '', opp: (e.opponent || {}).abbreviation || (e.opponent || {}).displayName || '' } : null; }).filter(Boolean);
+    return { rank: +rs.rank || 0, points: +rs.points || 0, record: row ? (rs.wins || 0) + 'W ' + (rs.ties || 0) + 'D ' + (rs.losses || 0) + 'L' : '',
+      scored: state === 'pre' ? bx.totalGoals || '' : '', conceded: state === 'pre' ? bx.goalsConceded || '' : '', form, out: [] };
+  };
+  // the commentary, newest first: the key moments of ESPN's play-by-play (or its key events)
+  const teamOf = {};
+  (d.keyEvents || []).forEach((k) => (teamOf[k.id] = (k.team || {}).id));
+  const line = (p, text, min, key) => { const t = String(text || '').trim(), kind = kindOfPlay(((p || {}).type || {}).type, t);
+    if (!kind) return null;
+    const tid = teamOf[(p || {}).id];
+    return { key: (p && p.id) || key, min, kind, text: kind === 'sub' && /^Substitution/i.test(t) && t.includes('. ') ? t.slice(t.indexOf('. ') + 2) : t, home: tid === homeId ? true : tid === awayId ? false : null }; };
+  const plays = d.commentary || [];
+  const lines = state === 'pre' ? [] : (plays.length ? plays.map((c) => line(c.play, c.text || (c.play || {}).text, ((c.time || {}).displayValue) || (((c.play || {}).clock || {}).displayValue) || '', 'c' + c.sequence))
+    : (d.keyEvents || []).map((k, i) => line(k, k.text, (k.clock || {}).displayValue || '', 'k' + i))).filter(Boolean).reverse();
+  const keys = new Set();
+  const commentary = lines.filter((l) => !keys.has(l.key) && keys.add(l.key)).slice(0, 80);
+  // the earlier meetings (friendlies left out), from this match's sides
+  let h2h = null;
+  const series = (d.seasonseries || []).find((s) => s.type === 'head-to-head');
+  if (series) {
+    const ms = (series.events || []).map((e) => {
+      if (!((e.statusType || {}).completed || e.status === 'post') || /friendl/i.test(e.competitionName || '')) return null;
+      const eh = (e.competitors || []).find((x) => x.homeAway === 'home'), ea = (e.competitors || []).find((x) => x.homeAway === 'away');
+      if (!eh || !ea) return null;
+      const atHome = (eh.team || {}).id === homeId ? true : (eh.team || {}).id === awayId ? false : null;
+      const hg = parseInt(eh.score, 10), ag = parseInt(ea.score, 10), t = Date.parse(e.date);
+      if (atHome == null || isNaN(hg) || isNaN(ag) || !t || Math.abs(t - start) < 6 * 3600000) return null;
+      return { at: t, comp: tidyLeague(e.competitionName || ''), homeAtHome: atHome, hg: atHome ? hg : ag, ag: atHome ? ag : hg };
+    }).filter(Boolean).sort((x, y) => y.at - x.at);
+    if (ms.length) h2h = { wins: ms.filter((m) => m.hg > m.ag).length, draws: ms.filter((m) => m.hg === m.ag).length, losses: ms.filter((m) => m.hg < m.ag).length,
+      since: new Date(ms[ms.length - 1].at).getUTCFullYear(), meetings: ms.slice(0, 5) };
+  }
+  const [homeTone, awayTone] = tones(game.home.color, game.away.color);
+  return { ok: true, game, venue, moments, stats, homeLineup: lineup('home'), awayLineup: lineup('away'), homeFacts: facts(homeId, hs), awayFacts: facts(awayId, as),
+    commentary, h2h, homeTone, awayTone };
+}
+
+// a cricket scorecard, from ESPN's summary (as the TV's: each innings' batters with how they were out, and the bowlers)
+async function cloudScorecard(leagueId, id, g) {
+  const d = await espn(ESPN_CRICKET + '/site/v2/sports/cricket/' + encodeURIComponent(leagueId) + '/summary?event=' + encodeURIComponent(id), 45000);
+  const header = d.header, comp = header.competitions[0], st = comp.status || {}, state = ((st.type || {}).state) || '', kind = ((st.type || {}).description) || '';
+  const summary = plainE(st.summary || '').replace(/ & /g, ' and ') || kind;
+  const playing = state === 'in' && !STOPPED.test(kind) && !STOPPED.test(summary);
+  const statMap = (cats) => { const o = {}; (cats || []).forEach((c) => (c.stats || []).forEach((s) => (o[s.name] = s.displayValue))); return o; };
+  const heads = {};
+  (comp.competitors || []).forEach((c) => (c.linescores || []).filter((l) => l.isBatting).forEach((l) => {
+    const allOut = /all out/i.test(l.description || '') || l.wickets >= 10, dec = /dec/i.test(l.description || '');
+    heads[l.period] = { team: (c.team || {}).displayName || '', l, overs: l.overs, allOut, dec, text: (allOut ? '' + l.runs : l.runs + '/' + l.wickets) + (dec ? 'd' : '') };
+  }));
+  const last = Math.max(0, ...Object.keys(heads).map(Number));
+  const lh = heads[last];
+  const lgen = lh ? statMap(((lh.l.statistics || {}).categories)) : {};
+  const current = lh && state === 'in' && !lh.allOut && !lh.dec && !(+lgen.ballLimit > 0 && +lgen.balls >= +lgen.ballLimit) ? last : -1;
+  const howOut = (c, out) => ({ c: 'caught', b: 'bowled', lbw: 'lbw', st: 'stumped', ro: 'run out', 'run out': 'run out', 'not out': 'not out', hw: 'hit wicket' })[String(c || '').toLowerCase()] || (c || (out ? 'out' : 'not out'));
+  const bat = {}, bowl = {};
+  (d.rosters || []).forEach((r) => { const team = (r.team || {}).displayName || '';
+    (r.roster || []).forEach((p) => { const a = p.athlete || {};
+      (p.linescores || []).forEach((ls) => (ls.linescores || []).forEach((inner) => {
+        const s = statMap(((inner.statistics || {}).categories));
+        if (s.batted === '1') { const out = s.outs === '1';
+          (bat[ls.period] = bat[ls.period] || []).push({ team, id: a.id, name: a.displayName || '', out: howOut(s.dismissalCard, out), runs: +s.runs || 0, balls: +s.ballsFaced || 0, fours: +s.fours || 0, sixes: +s.sixes || 0, notOut: !out, pos: +s.battingPosition || 99 }); }
+        if (s.overs && s.overs !== '0') (bowl[ls.period] = bowl[ls.period] || []).push({ team, name: a.displayName || '', overs: s.overs, maidens: +s.maidens || 0, runs: +s.conceded || 0, wickets: +s.wickets || 0, econ: s.economyRate !== '-' ? s.economyRate || '' : '', pos: +s.bowlingPosition || 99 });
+      }));
+    });
+  });
+  const periods = [...new Set(Object.keys(heads).concat(Object.keys(bat)).map(Number))].sort((x, y) => x - y);
+  const innings = periods.map((n) => {
+    const h = heads[n], bs = bat[n] || [];
+    const team = h ? h.team : (bs[0] || {}).team;
+    if (!team) return null;
+    const how = {}, outHow = {};
+    ((((h || {}).l || {}).statistics || {}).overs || []).forEach((grp) => (grp || []).forEach((o) => (o.wicket || []).forEach((w) => { const t = plainE(w.shortText || ''); if (t) how[w.number] = t; })));
+    (((h || {}).l || {}).fow || []).forEach((f) => { const a = f.athlete || {}; if (how[f.wicketNumber] && a.id) outHow[a.id] = how[f.wicketNumber]; });
+    const ist = h ? statMap(((h.l.statistics || {}).categories)) : {};
+    return { team, total: h ? h.text : '' + bs.reduce((s, b) => s + b.runs, 0), overs: h ? String(h.overs || '').replace(/\.0$/, '') : '', rate: ist.runRate && ist.runRate !== '-' ? ist.runRate : '', current: n === current,
+      batters: bs.filter((b) => b.team === team).sort((x, y) => x.pos - y.pos).map((b) => ({ name: b.name, out: outHow[b.id] || (b.notOut ? (n === current && playing ? 'batting' : 'not out') : b.out), runs: b.runs, balls: b.balls, fours: b.fours, sixes: b.sixes, notOut: b.notOut })),
+      bowlers: (bowl[n] || []).filter((b) => b.team !== team).sort((x, y) => x.pos - y.pos).map((b) => ({ name: b.name, overs: b.overs, maidens: b.maidens, runs: b.runs, wickets: b.wickets, econ: b.econ })) };
+  }).filter(Boolean);
+  const note = (t) => (((d.notes || []).find((x) => x.type === t)) || {}).text || '';
+  const sides = (comp.competitors || []).map((c) => (c.team || {}).displayName || '');
+  return { ok: true, title: comp.description || (header.title || '').split(' (')[0] || (g ? g.home.name + ' v ' + g.away.name : sides.join(' v ')), league: tidyLeague((header.league || {}).name),
+    status: summary, live: playing, venue: (((d.gameInfo || {}).venue) || {}).fullName || '', toss: plainE(note('toss').replace(/ ,/g, ',')), innings };
+}
+
+// with the TV off: its pages that ask it for more (a match, a scorecard, a story) ask ESPN instead
+const CLOUD = {
+  match: (q) => cloudMatch(q.id),
+  cricket: (q) => cloudScorecard(q.league, q.id),
+  story: (q) => cloudStory(q.id),
+};
+let sportsAt = 0, sportsLive = false;
+async function cloudSports() {
+  if (!S || Date.now() - sportsAt < (sportsLive ? 110000 : 590000)) return false;
+  sportsAt = Date.now();
+  const [a, b] = await Promise.all([cloudGames().catch(() => false), cloudTeams().catch(() => false)]);
+  sportsLive = !!(a || b);
+  return true;
+}
+
 /* ---------------------------------------------------------------- the weather from the internet, with the TV off */
 // Away from home with the TV off (no answer for five minutes), the weather comes from Open-Meteo straight, as the TV
 // gets it (Dubai in full, Mannar and Mumbai), every half hour; the rest stays as the TV last said it.
@@ -1379,15 +1743,23 @@ async function skyFor([city, country, lat, lon, tz], full) {
 }
 let cloudAt = 0;
 async function cloud() {
-  if (!AWAY || !S || Date.now() - seen < 300000 || Date.now() - cloudAt < 1800000) return;
-  const all = await Promise.all(CITIES.map((c, i) => skyFor(c, i === 0).catch(() => null)));
-  if (!all[0]) return;
-  cloudAt = Date.now();
-  S.weather = Object.assign({}, S.weather, all[0]);
-  const cities = all.slice(1).filter(Boolean).map((w) => Object.assign({}, w, { hours: w.hours.slice(0, 12) }));
-  if (cities.length) S.cities = cities;
+  if (!AWAY || !S || Date.now() - seen < 300000) return;
+  let changed = false;
+  if (Date.now() - cloudAt >= 1800000) {
+    const all = await Promise.all(CITIES.map((c, i) => skyFor(c, i === 0).catch(() => null)));
+    if (all[0]) {
+      cloudAt = Date.now();
+      S.weather = Object.assign({}, S.weather, all[0]);
+      const cities = all.slice(1).filter(Boolean).map((w) => Object.assign({}, w, { hours: w.hours.slice(0, 12) }));
+      if (cities.length) S.cities = cities;
+      changed = true;
+    }
+  }
+  if (await cloudSports()) changed = true;
+  if (!changed || Date.now() - seen < 300000) return;
   offline(true);
-  if (!page) drawStart(); else if (page.id === 'weather' && pivot) pivot.panels().forEach((_, i) => redrawPanel(i));
+  if (!page) drawStart();
+  else if (pivot && !['remote', 'title', 'photos', 'films', 'settings', 'money', 'timer', 'apps', 'match', 'story'].includes(page.id)) pivot.panels().forEach((_, i) => redrawPanel(i));
 }
 
 /* ---------------------------------------------------------------- live */
