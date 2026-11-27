@@ -2164,18 +2164,9 @@ async function live() {
 setInterval(live, 4000);
 
 /* ---------------------------------------------------------------- start */
-// a newer version of the app (the TV updated, or the public page did): it reloads into it, on Start, when it comes back
-const MY_V = ((document.querySelector('script[src*="app.js"]') || {}).src || '').replace(/^.*v=(\d+).*$/, '$1');
-async function newer() {
-  if (page || !MY_V) return;
-  try {
-    const h = await (await fetch(AWAY ? 'index.html' : '/', { cache: 'no-store' })).text();
-    const v = (h.match(/app\.js\?v=(\d+)/) || [])[1];
-    if (v && v !== MY_V && !page) location.reload();
-  } catch (e) { }
-}
-setInterval(() => { if (!document.hidden) newer(); }, 600000);
-document.addEventListener('visibilitychange', () => { if (!document.hidden) { newer(); if (AWAY) Relay.wake(); load(); live(); } });
+// the page's own check for a newer app (in index.html) leaves a page that is open alone
+window.metroOnPage = () => !!page;
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { if (AWAY) Relay.wake(); load(); live(); } });
 setInterval(() => {
   if (document.hidden) return;
   if (page && page.id === 'match' && page.show && page.show.state === 'in') return loadMatch();
