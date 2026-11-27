@@ -213,7 +213,7 @@ function offline(on) {
   const o = $('#offline');
   o.hidden = !on;
   const live = AWAY && (cloudAt || sportsAt);
-  if (on) o.textContent = (AWAY && !Relay.on ? 'Offline' : 'The TV is off') + (live ? ' · weather and scores live, the rest' : ' · showing what it said') +
+  if (on) o.textContent = (AWAY && !Relay.on ? 'Offline' : 'The TV is off') + (live ? ' · weather, scores, news and money live; the rest' : ' · showing what it said') +
     (seen ? (live ? ' from ' : ' at ') + (Date.now() - seen > 864e5 ? dayOf(seen) + ' ' : '') + hm(seen) : ' last');
   else { cloudAt = 0; sportsAt = 0; }
 }
@@ -912,14 +912,40 @@ function convWire(panel) {
   };
   a.oninput = draw; if (g) g.oninput = draw; draw();
 }
-function newsBy(cat) {
-  const l = (S.news || []).filter((n) => !cat || (n.cat || '').toLowerCase() === cat);
-  return l.map((n) => '<div class="news">' + (n.image ? '<div class="pic" style="' + bg(n.image) + '"></div>' : '') + '<div class="s">' + esc(n.source) + (n.ago ? ' · ' + esc(n.ago) + ' ago' : '') +
-    '</div><div class="t">' + esc(n.title) + '</div><div class="sum">' + esc(n.summary) + '</div></div>').join('') || none('No stories here yet');
-}
+const agoShort = (ms) => { if (!ms) return ''; const m = Math.max(0, Math.round((Date.now() - ms) / 60000)); return m < 60 ? m + ' min' : m < 1440 ? Math.round(m / 60) + ' h' : Math.round(m / 1440) + ' d'; };
+const newsList = (l) => l.map((n) => '<div class="news">' + (n.image ? '<div class="pic" style="' + bg(n.image) + '"></div>' : '') + '<div class="s">' + esc(n.source) +
+  ((n.published ? agoShort(n.published) : n.ago) ? ' · ' + esc(n.published ? agoShort(n.published) : n.ago) + ' ago' : '') +
+  '</div><div class="t">' + esc(n.title) + '</div><div class="sum">' + esc(n.summary) + '</div></div>').join('') || none('No stories here yet');
+function newsBy(cat) { return newsList((S.news || []).filter((n) => !cat || (n.cat || '').toLowerCase() === cat)); }
 function newsItems() {
+  const secs = (feeds && feeds.sections) || [];
+  if (secs.length) return [['top stories', () => newsBy(null)]].concat(secs.map((s) => [s.name.toLowerCase(), () => newsList(s.stories)]));
   const cats = [...new Set((S.news || []).map((n) => (n.cat || '').toLowerCase()).filter(Boolean))];
   return [['top stories', () => newsBy(null)]].concat(cats.map((c) => [c, () => newsBy(c)]));
+}
+
+/* ---------------------------------------------------------------- the news and the money from Metro's feeds job */
+// A GitHub job reads the papers and the rates every 20 minutes (as the TV does) and publishes them with the page as
+// feeds.json: the news page's sections always come from it; with the TV off, the top stories and the money too.
+let feeds = null, feedsAt = 0;
+async function getFeeds() {
+  if (Date.now() - feedsAt < 600000) return false;
+  feedsAt = Date.now();
+  try {
+    const r = await fetch((AWAY ? '' : 'https://thuva06.github.io/metro/') + 'feeds.json', { cache: 'no-store' });
+    if (!r.ok) return false;
+    const j = await r.json();
+    if (!j || !j.at || (feeds && j.at <= feeds.at)) return false;
+    feeds = j;
+    return true;
+  } catch (e) { return false; }
+}
+function feedsIn() {
+  if (!feeds || !S || !AWAY || Date.now() - seen < 300000) return false;
+  let changed = false;
+  if (feeds.news && feeds.news.length) { S.news = feeds.news; changed = true; }
+  if (feeds.money && feeds.money.lkr) { S.money = Object.assign({}, S.money, feeds.money, { gold: feeds.money.gold || (S.money || {}).gold, board: feeds.money.board || (S.money || {}).board, fuel: feeds.money.fuel || (S.money || {}).fuel }); changed = true; }
+  return changed;
 }
 
 /* ---------------------------------------------------------------- the pages */
@@ -1756,6 +1782,8 @@ async function cloud() {
     }
   }
   if (await cloudSports()) changed = true;
+  await getFeeds();
+  if (feedsIn()) changed = true;
   if (!changed || Date.now() - seen < 300000) return;
   offline(true);
   if (!page) drawStart();
@@ -1789,6 +1817,7 @@ setInterval(() => {
   if (page && page.id === 'match' && page.show && page.show.state === 'in') return loadMatch();
   if (!(page && ['remote', 'title', 'photos', 'films', 'settings', 'money', 'timer', 'apps', 'match', 'story'].includes(page.id))) load();
   cloud();
+  getFeeds().then((got) => { if (got && page && page.id === 'news' && pivot) drawPage(false); });
 }, 30000);
 setInterval(() => { if (!page && S) drawStatus(); }, 15000);
 // away from home, the TV's app icons come through the relay too
@@ -1797,6 +1826,7 @@ if (AWAY) new MutationObserver(() => document.querySelectorAll('img[data-icon]:n
   Relay.icon(im.dataset.icon).then((u) => { if (u) im.src = u; });
 })).observe(document.body, { childList: true, subtree: true });
 async function boot() {
+  getFeeds();
   if (AWAY) { if (!(await Relay.ready())) return pairGate(); Relay.fonts(); }
   const j = await call('hello', '', AWAY ? 9000 : 6000).catch(() => null);
   if (!j) { offline(true); if (!S) load(); cloud(); return; }

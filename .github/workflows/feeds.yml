@@ -1,0 +1,52 @@
+# Metro's public page, published by this job: the app's files as they are, with feeds.json (the news and the money,
+# read by tools/feeds.mjs) made fresh every 20 minutes, so the app has them with the TV off.
+name: feeds
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '7,27,47 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: The page and its feeds
+        run: |
+          mkdir -p site
+          cp index.html app.js app.css manifest.json icon-180.png icon-512.png .nojekyll site/
+          node tools/feeds.mjs site/feeds.json
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4
+      # GitHub stops a schedule after 60 days without a commit: one empty commit every 50 days keeps it going
+      - name: Keep the schedule alive
+        if: github.event_name == 'schedule'
+        run: |
+          if [ $(( $(date +%s) - $(git log -1 --format=%ct) )) -gt 4320000 ]; then
+            git config user.name "metro-feeds"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit --allow-empty -m "Keep the feeds schedule alive"
+            git push
+          fi
