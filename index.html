@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Metro">
+<meta name="theme-color" content="#000000">
+<meta name="format-detection" content="telephone=no">
+<link rel="apple-touch-icon" href="icon-180.png?v=2">
+<link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="app.css?v=13">
+<title>Metro</title>
+</head>
+<body>
+<div id="aura"><i></i><i></i><i></i></div>
+<div id="offline" hidden></div>
+<main id="start" class="screen">
+  <header class="top"><div class="brand">metro</div><div class="status" id="status"></div></header>
+  <div id="startBody"></div>
+  <p class="foot" id="foot"></p>
+</main>
+<main id="page" hidden>
+  <div class="phead">
+    <div class="pano" id="pano"></div>
+    <div class="kicker" id="kicker"></div>
+    <div class="pivots"><div class="strip" id="strip"></div></div>
+  </div>
+  <div class="panels" id="panels"></div>
+</main>
+<nav id="bar"></nav>
+<div id="gate" hidden>
+  <div class="kicker">METRO · PHONE</div>
+  <h1 class="h1">the code</h1>
+  <p class="dim">The TV is showing a four-digit code. Type it here once and this phone remembers it.</p>
+  <div class="row"><input id="code" inputmode="numeric" maxlength="4" placeholder="0000" autocomplete="one-time-code"><button class="go" id="codego">OK</button></div>
+</div>
+<div id="toast"></div>
+<script src="app.js?v=13"></script>
+</body>
+</html>
