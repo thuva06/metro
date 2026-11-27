@@ -5,6 +5,8 @@
 'use strict';
 const $ = (s) => document.querySelector(s);
 let code = localStorage.getItem('metro-code') || '';
+let token = localStorage.getItem('metro-token') || '';
+const auth = () => (token ? 'token=' + encodeURIComponent(token) : 'code=' + encodeURIComponent(code));
 let S = null;           // what the TV knows
 let seen = 0;           // when the TV last answered
 let page = null;        // the page open: { id, at, show }
@@ -22,8 +24,14 @@ async function call(p, a, ms) {
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), ms || 12000);
   try {
-    const r = await fetch('/api/' + p + '?code=' + encodeURIComponent(code) + (a ? '&' + a : ''), { cache: 'no-store', signal: ctl.signal });
-    return await r.json();
+    const r = await fetch('/api/' + p + '?' + auth() + (a ? '&' + a : ''), { cache: 'no-store', signal: ctl.signal });
+    const j = clean(await r.json());
+    // paired: the token from now on (the code was good for this once); a token the TV no longer knows is dropped
+    if (j.token && /^[0-9a-f]{32}$/.test(j.token)) { token = j.token; code = ''; try { localStorage.setItem('metro-token', token); localStorage.removeItem('metro-code'); } catch (e) { } }
+    // a token the TV no longer knows, or a code that isn't the one on show: dropped, so it isn't sent again (each wrong
+    // code counts towards the TV's lock) and the code screen asks for the one the TV shows now
+    if (j.need === 'code' && (token || code)) { token = ''; code = ''; try { localStorage.removeItem('metro-token'); localStorage.removeItem('metro-code'); } catch (e) { } }
+    return j;
   } finally { clearTimeout(t); }
 }
 /* ---------------------------------------------------------------- away from home: through the relay */
@@ -46,7 +54,9 @@ const Relay = (() => {
   const packet = (type, body) => { const l = []; let n = body.length; do { let d = n % 128; n = Math.floor(n / 128); if (n) d |= 128; l.push(d); } while (n); return cat(new Uint8Array([type].concat(l)), body); };
   const store = (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (e) { } };
   const kept = (k) => { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } };
-  let key = null, base = '', me = '', order = Promise.resolve();
+  let key = null, base = '', me = '', order = Promise.resolve(), keyHub = null, baseHub = '';
+  // the hub has its own key, made from this one (the TV gives the hub only that): its topic and its seal
+  const kOf = (topic) => (baseHub && topic.startsWith(baseHub + '/') ? keyHub : key);
   const waiting = new Map(), icons = new Map();
   // both brokers at once: everything is sent on each (the TV and the hub take a message once, by its one-off number),
   // so whichever the hub is on, and the faster of the two, answers
@@ -54,7 +64,9 @@ const Relay = (() => {
   const R = { onState: null, get on() { return conns.some((c) => c.live); }, get via() { return conns.filter((c) => c.live).map((c) => NAMES[c.n]).join(' and ') || 'none'; } };
 
   // the key: from the pairing link (#pair=…), or pasted; kept on this phone only
-  R.take = (k) => { k = String(k || '').trim().replace(/^.*pair=/, ''); if (!/^[A-Za-z0-9_-]{43}$/.test(k)) return false; store('metro-key', k); key = null; readying = null; return true; };
+  // a new TV: what the last one said is dropped with its key
+  const fresh = () => { ['metro-state', 'metro-seen', 'metro-me'].forEach((x) => store(x, null)); };
+  R.take = (k) => { k = String(k || '').trim().replace(/^.*pair=/, ''); if (!/^[A-Za-z0-9_-]{43}$/.test(k)) return false; if (k !== kept('metro-key')) fresh(); store('metro-key', k); key = null; readying = null; return true; };
   R.forget = () => { store('metro-key', null); store('metro-state', null); key = null; readying = null; conns.forEach((c) => { try { c.ws && c.ws.close(); } catch (e) { } }); };
   R.paired = () => !!kept('metro-key') || /pair=[A-Za-z0-9_-]{43}/.test(location.hash);
   // made once, however many ask at once (at the start, the fonts, the first answer and the state all do): each
@@ -67,14 +79,26 @@ const Relay = (() => {
   }
   async function prepare() {
     if (key) return true;
+    // a pairing link: the key never stays in the address, and one that would put another TV in place of this one asks
     const m = location.hash.match(/pair=([A-Za-z0-9_-]{43})/);
-    if (m) { store('metro-key', m[1]); if (navigator.standalone) history.replaceState(null, '', location.pathname); }
+    if (m) {
+      history.replaceState(null, '', location.pathname + location.search);
+      const had = kept('metro-key');
+      if (had !== m[1] && (!had || confirm('This link pairs Metro with a TV, in place of the one it is paired with now. Go on?'))) {
+        fresh(); store('metro-key', m[1]);
+        if (had) { location.replace(location.pathname + location.search); return false; }
+      }
+    }
     const k = kept('metro-key');
     if (!k) return false;
     const raw = unb64(k);
     if (raw.length !== 32) return false;
     key = await crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']);
     base = 'metro/' + hex(new Uint8Array(await crypto.subtle.digest('SHA-256', cat(te.encode('metro-topic'), raw)))).slice(0, 24);
+    const hk = await crypto.subtle.importKey('raw', raw, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    const hubRaw = new Uint8Array(await crypto.subtle.sign('HMAC', hk, te.encode('metro-hub')));
+    keyHub = await crypto.subtle.importKey('raw', hubRaw, 'AES-GCM', false, ['encrypt', 'decrypt']);
+    baseHub = 'metro/' + hex(new Uint8Array(await crypto.subtle.digest('SHA-256', cat(te.encode('metro-topic'), hubRaw)))).slice(0, 24);
     me = kept('metro-me') || hex(rand(6));
     store('metro-me', me);
     return true;
@@ -111,7 +135,7 @@ const Relay = (() => {
       c.buf = c.buf.slice(i + n);
       if (type >> 4 === 2) {
         if (body[1] !== 0) { s.close(); continue; }
-        s.send(packet(0x82, cat(new Uint8Array([0, 1]), str(base + '/ph/' + me), new Uint8Array([0]), str(base + '/state'), new Uint8Array([0]))));
+        s.send(packet(0x82, cat(new Uint8Array([0, 1]), str(base + '/ph/' + me), new Uint8Array([0]), str(base + '/state'), new Uint8Array([0]), str(baseHub + '/ph/' + me), new Uint8Array([0]))));
         clearInterval(c.ping);
         // a ping every 25 s, answered by the broker: a link that has heard nothing for 65 s is dead (a phone closes
         // them quietly in the background), so it is closed and made again
@@ -127,12 +151,12 @@ const Relay = (() => {
   // the seal: [1, flags] + 12 random bytes + AES-GCM, bound to the topic (flag 1: gzipped inside)
   async function seal(topic, o) {
     const head = new Uint8Array([1, 0]), iv = rand(12);
-    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: cat(head, te.encode(topic)) }, key, te.encode(JSON.stringify(o)));
+    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: cat(head, te.encode(topic)) }, kOf(topic), te.encode(JSON.stringify(o)));
     return cat(head, iv, new Uint8Array(ct));
   }
   async function open(topic, m) {
     if (m.length < 30 || m[0] !== 1) return null;
-    const plain = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: m.subarray(2, 14), additionalData: cat(m.subarray(0, 2), te.encode(topic)) }, key, m.subarray(14)));
+    const plain = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: m.subarray(2, 14), additionalData: cat(m.subarray(0, 2), te.encode(topic)) }, kOf(topic), m.subarray(14)));
     const text = m[1] & 1 ? await new Response(new Blob([plain]).stream().pipeThrough(new DecompressionStream('gzip'))).text() : td.decode(plain);
     return JSON.parse(text);
   }
@@ -140,27 +164,27 @@ const Relay = (() => {
     let j;
     try { j = await open(topic, m); } catch (e) { return; }
     if (!j) return;
-    if (topic === base + '/state') { if (j.state && R.onState) R.onState(j.state, j.t); return; }
+    if (topic === base + '/state') { if (j.state && R.onState && +j.t < Date.now() + 300000) R.onState(clean(j.state), +j.t); return; }
     if (Math.abs(Date.now() - j.t) > 300000) return;
     const f = waiting.get(j.i);
     if (f) { waiting.delete(j.i); f(j); }
   }
-  async function ask(to, p, q, ms, b) {
+  async function ask(to, p, q, ms, body) {
     if (!(await ready())) throw new Error('unpaired');
     await connect();
-    const i = hex(rand(6)), topic = base + '/' + to;
+    const b = to === 'hub' ? baseHub : base, i = hex(rand(6)), topic = b + '/' + to;
     return new Promise((ok, no) => {
       const t = setTimeout(() => { waiting.delete(i); no(new Error('no answer')); }, ms || 12000);
       waiting.set(i, (j) => { clearTimeout(t); ok(j); });
       order = order.then(async () => {
-        const m = packet(0x30, cat(str(topic), await seal(topic, { t: Date.now(), n: hex(rand(8)), i, p, q: q || {}, r: base + '/ph/' + me, b })));
+        const m = packet(0x30, cat(str(topic), await seal(topic, { t: Date.now(), n: hex(rand(8)), i, p, q: q || {}, r: b + '/ph/' + me, b: body })));
         let sent = 0;
         conns.forEach((c) => { if (c.live && c.ws) try { c.ws.send(m); sent++; } catch (e) { } });
         if (!sent) throw new Error('down');
       }).catch((e) => { clearTimeout(t); waiting.delete(i); no(e); });
     });
   }
-  const json = (r) => r.j || JSON.parse(r.b || '{}');
+  const json = (r) => clean(r.j || JSON.parse(r.b || '{}'));
   // the hub first for the AC (so it works with the TV off), the TV only if the hub isn't on the relay: never both
   // (a second press turns the AC back)
   const hub = () => ask('hub', '/health', {}, 5000).then(() => true, () => false);
@@ -186,7 +210,7 @@ const Relay = (() => {
   };
   R.photo = async (blob) => json(await ask('tv', '/api/photo', {}, 60000, b64(new Uint8Array(await blob.arrayBuffer()))));
   R.icon = (pkg) => {
-    if (!icons.has(pkg)) icons.set(pkg, ask('tv', '/api/icon', { pkg }, 15000).then((r) => (r.x ? 'data:image/png;base64,' + r.x : ''), () => { icons.delete(pkg); return ''; }));
+    if (!icons.has(pkg)) icons.set(pkg, ask('tv', '/api/icon', { pkg }, 15000).then((r) => (isB64(r.x) ? 'data:image/png;base64,' + r.x : ''), () => { icons.delete(pkg); return ''; }));
     return icons.get(pkg);
   };
   // Segoe, as on the TV: it isn't on the public page (it's Microsoft's), so the TV sends it, sealed, once; then it's kept
@@ -200,7 +224,7 @@ const Relay = (() => {
         if (hit) bytes = await hit.arrayBuffer();
         else {
           const r = await ask('tv', '/font/' + n + '.ttf', {}, 30000);
-          if (!r.x) return;
+          if (!isB64(r.x)) return;
           bytes = unb64(r.x.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')).buffer;
           if (box) await box.put('/font/' + n, new Response(bytes, { headers: { 'Content-Type': 'font/ttf' } }));
         }
@@ -232,7 +256,7 @@ async function act(p, a, quiet) {
   if (p === 'ac') return acPress();
   try {
     const j = await (p === 'key' ? call(p, a) : busy(call(p, a)));
-    if (j.need) return gate();
+    if (j.need) return j.need === 'wait' ? toast(j.line) : gate();
     if (!quiet || !j.ok) toast(j.line || (j.ok ? 'Done' : "That didn't work"));
     return j;
   } catch (e) { toast(AWAY ? (Relay.on ? "The TV didn't answer: it may be off" : "The relay can't be reached: is this phone online?") : S ? 'The TV is off or away from the Wi-Fi' : "The TV didn't answer"); trouble(); }
@@ -275,7 +299,7 @@ function offline(on) {
 async function load() {
   try {
     const j = await call('state', '', 20000);
-    if (j.need) return gate();
+    if (j.need) return j.need === 'wait' ? toast(j.line) : gate();
     const sig = sigOf(j), same = sig === lastSig;
     lastSig = sig;
     S = j; seen = Date.now();
@@ -298,8 +322,8 @@ function gate() {
 $('#codego').onclick = async () => {
   code = $('#code').value.trim();
   const j = await call('hello').catch(() => ({}));
-  if (j.ok) { localStorage.setItem('metro-code', code); $('#gate').hidden = true; load(); }
-  else toast('Not that one: look at the TV');
+  if (j.ok) { $('#gate').hidden = true; load(); }
+  else toast(j.line || 'Not that one: look at the TV');
 };
 // away from home, unpaired: the key from Metro at home (its settings › anywhere opens this page with it, and copies it)
 function pairGate() {
@@ -334,8 +358,36 @@ const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&':
 const TZ = { timeZone: 'Asia/Dubai' };
 const hm = (ms) => new Date(ms).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', ...TZ });
 const dayOf = (ms) => new Date(ms).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', ...TZ });
-const n0 = (v) => Math.round(v).toLocaleString('en-GB');
-const n2 = (v) => v.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const num = (v) => (isFinite(+v) ? +v : 0);
+const n0 = (v) => Math.round(num(v)).toLocaleString('en-GB');
+const n2 = (v) => num(v).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+/* ---------------------------------------------------------------- everything that comes in, made safe */
+// Whatever reaches the app (the TV's answers, the relay, ESPN, the feeds, what was kept) passes through here first: text
+// can't carry < > " ' ` (quotes become curly ones), links must be https and are percent-encoded, colours must be #hex,
+// numbers must be finite, and keys must be plain. So nothing from outside can ever become markup, whatever draws it.
+const SAFE = { '<': '‹', '>': '›', '`': '‘' };
+const smart = (s) => s.replace(/[<>`]/g, (c) => SAFE[c]).replace(/(^|[\s([{—–-])"/g, '$1“').replace(/"/g, '”').replace(/(^|[\s([{—–-])'/g, '$1‘').replace(/'/g, '’');
+function safeUrl(u) {
+  try {
+    const x = new URL(u.replace(/^http:/i, 'https:'));
+    return x.protocol === 'https:' ? x.href.replace(/['"()\\\s<>`]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')) : '';
+  } catch (e) { return ''; }
+}
+function clean(v, k) {
+  if (Array.isArray(v)) return v.map((x) => clean(x, k));
+  if (v && typeof v === 'object') {
+    const o = {};
+    Object.keys(v).forEach((key) => { if (/^[A-Za-z0-9_.:-]{1,64}$/.test(key) && key !== '__proto__' && key !== 'constructor' && key !== 'prototype') o[key] = clean(v[key], key); });
+    return o;
+  }
+  if (typeof v === 'number') return isFinite(v) ? v : 0;
+  if (typeof v !== 'string') return v;
+  if (k && /colou?r$|tone$|^accent$|^svcColor$/i.test(k)) return /^#[0-9a-f]{3,8}$/i.test(v) ? v : '';
+  if (/^https?:\/\//i.test(v)) return safeUrl(v);
+  return smart(v);
+}
+const isB64 = (s) => typeof s === 'string' && /^[A-Za-z0-9+/=]+$/.test(s);
+
 function when(ms) {
   const m = Math.round((ms - Date.now()) / 60000);
   if (m < 0) return 'now';
@@ -881,13 +933,6 @@ document.addEventListener('click', (e) => {
   const t = [].concat((S.bayern || {}).tables || [], (S.germany || {}).tables || []).find((x) => x.name === name);
   if (t) box.outerHTML = table(t, b.dataset.full === '1');
 });
-// a city's weather (Mannar, Mumbai): now, the next hours, the week
-function cityPanel(c) {
-  return '<div style="display:flex;align-items:center;gap:16px;margin-top:8px"><div class="big" style="font-size:88px">' + c.temp + '°</div><div>' + ico(skyIcon(c.sky, c.day), 48) + '<div class="mid" style="font-size:24px">' +
-    esc(c.condition.toLowerCase()) + '</div></div></div><div class="sub" style="margin-top:6px">' + esc(c.country) + ' · ' + c.time + ' there · feels like ' + c.feels + '° · ' + c.high + '° / ' + c.low + '°</div>' +
-    hoursChart(c.hours.concat(c.hours)) + '<div class="sec">the week</div>' + c.days.map((d, i) => '<div class="item">' + ico(skyIcon(d.sky, true)) + '<div class="grow"><div class="t">' + (i === 0 ? 'today' : esc(d.day)) +
-    '</div>' + (d.rain ? '<div class="s">rain ' + d.rain + '%</div>' : '') + '</div><div class="r" style="font-weight:300;font-size:24px">' + d.high + '° <span class="faint">' + d.low + '°</span></div></div>').join('');
-}
 function board(m) {
   if (!m.board) return '';
   const v = (x) => x == null ? '–' : n2(x);
@@ -1022,7 +1067,6 @@ function storyPage(n) {
     '<div class="sub" style="margin-top:8px">' + ago(n.at) + (n.by ? ' · ' + esc(n.by) : '') + '</div>' + (paras.length ? paras.map((p) => p.head ? '<div class="sec">' + esc(p.text) + '</div>' : '<p class="para">' + esc(p.text) + '</p>').join('') :
     '<p class="para">' + esc(n.text) + '</p>' + (page.data ? '' : '<p class="sub">getting the whole story…</p>'));
 }
-const grid = (l, ranked) => l && l.length ? '<div class="grid-posters">' + l.map((t) => posterCard(t, ranked)).join('') + '</div>' : none('Nothing here yet');
 
 // the next 24 hours as a line, with the temperatures over it and the hours under it
 function hoursChart(hours) {
@@ -1048,15 +1092,15 @@ function month() {
   }
   return '<div class="mid" style="margin-top:4px">' + first.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' }).toLowerCase() + '</div><div class="month">' + cells + '</div>';
 }
-function converterOld() {}
 // the converter: any currencies (the TV has every rate), kept on this phone; type in any of them
 const CUR_KEY = 'metro-currencies';
-const curList = () => { try { const l = JSON.parse(localStorage.getItem(CUR_KEY) || 'null'); return Array.isArray(l) && l.length ? l : ['LKR', 'INR']; } catch (e) { return ['LKR', 'INR']; } };
+const curList = () => { try { const l = JSON.parse(localStorage.getItem(CUR_KEY) || 'null'); return Array.isArray(l) && l.length ? l.filter((c) => /^[A-Z]{3}$/.test(c)) : ['LKR', 'INR']; } catch (e) { return ['LKR', 'INR']; } };
 const curSave = (l) => { try { localStorage.setItem(CUR_KEY, JSON.stringify(l)); } catch (e) { } };
 let curBase = 'AED', curAmt = 1000;
 const curName = (c) => { try { return new Intl.DisplayNames(['en'], { type: 'currency' }).of(c); } catch (e) { return c; } };
-const rateOf = (c) => { const m = S.money || {}; return c === 'AED' ? 1 : c === 'LKR' ? m.lkr : c === 'INR' ? m.inr : (m.rates || {})[c]; };
-const fmtCur = (v) => (v >= 100 ? n0(v) : v >= 1 ? n2(v) : v.toLocaleString('en-GB', { maximumSignificantDigits: 4 }));
+const rateOf = (c) => { const m = S.money || {}; const r = c === 'AED' ? 1 : c === 'LKR' ? m.lkr : c === 'INR' ? m.inr : (m.rates || {})[c]; return isFinite(+r) && +r > 0 ? +r : 0; };
+const fmtCur = (v) => { v = num(v); return v >= 100 ? n0(v) : v >= 1 ? n2(v) : v.toLocaleString('en-GB', { maximumSignificantDigits: 4 }); };
+const isCur = (c) => /^[A-Z]{3}$/.test(c);
 function converter() {
   const m = S.money;
   if (!m) return none('No rates yet');
@@ -1088,7 +1132,7 @@ function convWire(panel) {
   const pick = panel.querySelector('#curpick'), find = panel.querySelector('#curfind'), all = panel.querySelector('#curall');
   const list = () => {
     const w = find.value.trim().toLowerCase(), have = curList();
-    const codes = Object.keys(m.rates || {}).filter((c) => c !== 'AED' && !have.includes(c)).map((c) => [c, curName(c)])
+    const codes = Object.keys(m.rates || {}).filter((c) => isCur(c) && c !== 'AED' && !have.includes(c) && rateOf(c)).map((c) => [c, curName(c)])
       .filter(([c, n]) => !w || c.toLowerCase().includes(w) || n.toLowerCase().includes(w)).sort((x, y) => x[1].localeCompare(y[1])).slice(0, 60);
     all.innerHTML = codes.map(([c, n]) => '<div class="item tap" data-curadd="' + c + '"><span class="eic" style="font-size:13px;font-weight:600">' + c + '</span><div class="grow"><div class="t">' + esc(n) + '</div><div class="s">1 AED = ' +
       fmtCur(m.rates[c]) + ' ' + c + '</div></div></div>').join('') || none(m.rates ? 'No currency by that name' : 'The rates come with the TV\'s next answer');
@@ -1121,7 +1165,7 @@ async function getFeeds() {
   try {
     const r = await fetch((AWAY ? '' : 'https://thuva06.github.io/metro/') + 'feeds.json', { cache: 'no-store' });
     if (!r.ok) return false;
-    const j = await r.json();
+    const j = clean(await r.json());
     if (!j || !j.at || (feeds && j.at <= feeds.at)) return false;
     feeds = j;
     return true;
@@ -1274,7 +1318,7 @@ const PAGES = {
     ['send', () => field('search', 'search Metro on the TV', 'a film, a series or an app', 'q', 'search') + field('youtube', 'a YouTube link', 'paste it, and it plays on the TV', 'url', 'yt') +
       field('alert', 'a message on the screen', 'over whatever is on', 'text', 'chat') + field('type', 'type on the TV', 'into whatever box is open', 'text', 'keyboard')],
   ] },
-  apps: { name: 'apps', items: () => [['on the tv', () => '<div class="apps">' + (S.apps || []).map((a) => '<div class="app" data-launch="' + esc(a.pkg) + '"><img ' + (AWAY ? 'data-icon="' + esc(a.pkg) + '"' : 'src="/api/icon?code=' + encodeURIComponent(code) + '&pkg=' +
+  apps: { name: 'apps', items: () => [['on the tv', () => '<div class="apps">' + (S.apps || []).map((a) => '<div class="app" data-launch="' + esc(a.pkg) + '"><img ' + (AWAY ? 'data-icon="' + esc(a.pkg) + '"' : 'src="/api/icon?' + auth() + '&pkg=' +
     encodeURIComponent(a.pkg) + '"') + ' alt="" loading="lazy"><span>' + esc(a.label) + '</span></div>').join('') + '</div>' || none('No apps')]] },
   search: { name: 'search', items: () => [['everything', searchPage]] },
   timer: { name: 'timer', items: () => [['timer', () => { const t = S.timer || {};
@@ -1301,7 +1345,7 @@ const PAGES = {
 /* a film or series: its picture, what it is, where it streams, and the TV one press away */
 function titlePage(t) {
   const len = t.runtime ? (t.runtime >= 60 ? Math.floor(t.runtime / 60) + ' h ' + (t.runtime % 60) + ' min' : t.runtime + ' min') : '';
-  const meta = [t.year, t.kind, len, t.imdb ? '★ ' + t.imdb.toFixed(1) : ''].filter(Boolean);
+  const meta = [t.year, t.kind, len, num(t.imdb) ? '★ ' + num(t.imdb).toFixed(1) : ''].filter(Boolean);
   setTimeout(() => where(t), 0);
   return '<div class="title-hero" style="' + bg(t.backdrop || t.wide) + '"></div><div class="title-name">' + esc(t.title) + '</div><div class="chips">' + meta.map((m) => '<span>' + esc(m) + '</span>').join('<span>·</span>') +
     (t.age ? '<span class="b">' + esc(t.age) + '</span>' : '') + (t.badges || []).map((b) => '<span class="b">' + esc(b) + '</span>').join('') + svcTag(t) + '</div>' +
@@ -1315,7 +1359,7 @@ async function where(t) {
   const j = await act('where', q('id', t.id), true);
   const box = $('#where');
   if (!box || !j || !j.ok) return;
-  box.innerHTML = j.vpn ? '<div class="vpn"><div class="k">NOT ON YOUR SERVICES · VPN</div><div class="t">Connect your VPN to ' + esc(j.vpn) + ', then play it on ' + esc(j.on.join(' or ')) + '.</div>' +
+  box.innerHTML = j.vpn ? '<div class="vpn"><div class="k">NOT ON YOUR SERVICES · VPN</div><div class="t">Connect your VPN to ' + esc(j.vpn) + ', then play it on ' + esc((j.on || []).join(' or ')) + '.</div>' +
     (j.netflix ? '<div class="sub" style="margin-top:6px">Netflix has it in ' + esc(j.netflix) + '</div>' : '') + (j.prime ? '<div class="sub">Prime Video has it in ' + esc(j.prime) + '</div>' : '') + '</div>'
     : '<div class="vpn plain"><div class="t">' + esc(j.line) + '</div></div>';
 }
@@ -1435,7 +1479,8 @@ function wireAnywhere(panel) {
     let k = '';
     const show = (j) => {
       if (!j || !j.ok) return;
-      panel.querySelector('#anyst').textContent = j.key ? 'relay ' + (j.online ? 'connected' : 'starting') + ' · the AC hub ' + (j.hub ? 'has the key' : 'gets the key when it next answers the TV') : 'not set up yet';
+      panel.querySelector('#anyst').textContent = j.key ? 'relay ' + (j.online ? 'connected' : 'starting') + ' · the AC hub ' + (j.hub ? 'has the key' : j.hubForeign ?
+        'has another key: unplug it and plug it back in, and the TV gives it this one within five minutes' : 'gets the key when it next answers the TV') : 'not set up yet';
       if (j.link) { any.href = j.link; k = j.key; panel.querySelector('#anys').textContent = 'opens Metro\'s public page, paired'; }
     };
     call('relay', 'peek=1').then(show, () => { });
@@ -1529,13 +1574,13 @@ function wire(panel) {
       const base = picked.length;
       j.items.forEach((t) => picked.push(t));
       box.innerHTML = j.items.map((t, i) => '<div class="item tap" data-t="' + (base + i) + '"><img class="thumb" src="' + esc(t.poster) + '" alt="" loading="lazy"><div class="grow"><div class="t">' + esc(t.title) + '</div><div class="s">' +
-        esc([t.kind, t.year, (t.genres || [])[0], t.imdb ? 'IMDb ' + t.imdb.toFixed(1) : ''].filter(Boolean).join(' · ')) + '</div><div class="s" data-where="' + esc(t.id) + '">' + (t.svc ? svcTag(t) : 'finding where it streams…') + '</div></div></div>').join('');
+        esc([t.kind, t.year, (t.genres || [])[0], num(t.imdb) ? 'IMDb ' + num(t.imdb).toFixed(1) : ''].filter(Boolean).join(' · ')) + '</div><div class="s" data-where="' + esc(t.id) + '">' + (t.svc ? svcTag(t) : 'finding where it streams…') + '</div></div></div>').join('');
       box.querySelectorAll('[data-t]').forEach((el) => { press(el); el.onclick = () => openTitle(picked[+el.dataset.t]); });
       // where each one not on the services streams, a few at a time
       for (const t of j.items.filter((x) => !x.svc).slice(0, 8)) {
         const w = await call('where', q('id', t.id)).catch(() => null);
-        const el = box.querySelector('[data-where="' + t.id + '"]');
-        if (el && w && w.ok) el.innerHTML = w.vpn ? '<span class="svc" style="--sc:#fa6800">VPN</span> ' + esc(w.vpn) + ' · ' + esc(w.on.join(' or ')) : esc(w.line);
+        const el = box.querySelector('[data-where="' + CSS.escape(String(t.id)) + '"]');
+        if (el && w && w.ok) el.innerHTML = w.vpn ? '<span class="svc" style="--sc:#fa6800">VPN</span> ' + esc(w.vpn) + ' · ' + esc((w.on || []).join(' or ')) : esc(w.line);
       }
     };
     find.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(go, 600); });
@@ -1552,7 +1597,7 @@ function wire(panel) {
         log.textContent = 'sending ' + (i + 1) + ' of ' + all.length + '…';
         try {
           const blob = await shrink(all[i], AWAY ? 1600 : 2048);
-          const j = AWAY ? await Relay.photo(blob) : await (await fetch('/api/photo?code=' + encodeURIComponent(code), { method: 'POST', body: blob })).json();
+          const j = AWAY ? await Relay.photo(blob) : clean(await (await fetch('/api/photo?' + auth(), { method: 'POST', body: blob })).json());
           if (!j.ok) { log.textContent = j.line || "The TV didn't take it"; return; }
         } catch (e) { log.textContent = "That photo couldn't be sent"; return; }
       }
@@ -1637,7 +1682,7 @@ async function espn(u, keepMs) {
   if (k && Date.now() - k[0] < (keepMs || 50000)) return k[1];
   const r = await fetch(u);
   if (!r.ok) throw new Error('ESPN ' + r.status);
-  const j = await r.json();
+  const j = clean(await r.json());
   kept.set(u, [Date.now(), j]);
   return j;
 }
@@ -1788,7 +1833,7 @@ async function cloudStory(id) {
   const doc = new DOMParser().parseFromString(html, 'text/html');
   const paras = [...doc.querySelectorAll('p, h2, h3, h4, li, blockquote')].filter((e) => !e.closest('li p, blockquote p') || e.tagName !== 'P')
     .map((e) => ({ text: e.textContent.replace(/[ \t ]+/g, ' ').trim(), head: /^H/.test(e.tagName) })).filter((p) => p.text);
-  return { ok: paras.length > 0, paras };
+  return clean({ ok: paras.length > 0, paras });
 }
 
 // a football match in full, from ESPN's summary (the TV adds FotMob's ratings and photos; the phone has ESPN's alone)
@@ -2148,7 +2193,7 @@ function wireSearch(panel) {
 // only what changed is drawn again (the tiles that show it on Start; the page's item that shows it).
 let liveSig = '';
 async function live() {
-  if (document.hidden || !S || (!code && !AWAY)) return;
+  if (document.hidden || !S || (!code && !token && !AWAY)) return;
   const j = await call('live', '', 5000).catch(() => null);
   if (!j || j.need) return;
   fine(); seen = Date.now();
@@ -2156,6 +2201,7 @@ async function live() {
   if (sig === liveSig) return;
   const first = !liveSig;
   liveSig = sig;
+  if (j.radio && S.radio) j.radio = Object.assign({}, S.radio, j.radio);
   Object.assign(S, j);
   if (first) return;
   if (!page) { redrawTiles(); drawStatus(); }
@@ -2185,12 +2231,12 @@ async function boot() {
   if (AWAY) { if (!(await Relay.ready())) return pairGate(); Relay.fonts(); }
   const j = await call('hello', '', AWAY ? 9000 : 6000).catch(() => null);
   if (!j) { offline(true); setTimeout(load, 3000); cloud(); return; }
-  if (j.need) gate(); else load();
+  if (j.need) { gate(); if (j.need === 'wait') toast(j.line); } else load();
 }
 (async () => {
   // what the TV said last time, at once; then the TV's answer now
   try {
-    const kept = (code || AWAY) && JSON.parse(localStorage.getItem('metro-state') || 'null');
+    const kept = (code || token || AWAY) && clean(JSON.parse(localStorage.getItem('metro-state') || 'null'));
     seen = +(localStorage.getItem('metro-seen') || 0);
     if (kept) { S = kept; applyAccent(); drawStart(); }
     else $('#startBody').innerHTML = '<div class="greet"><b class="skel" style="width:60%;height:40px;display:block"></b></div><div class="skel" style="margin-top:20px;aspect-ratio:16/10"></div>' +

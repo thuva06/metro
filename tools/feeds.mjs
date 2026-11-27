@@ -169,7 +169,7 @@ async function money() {
   if (k24 != null && month.length) month[month.length - 1] = k24;
   const session = b ? (() => { const r = b.karats.find((x) => x.karat === '24K') || {}; return r.evening != null ? 'Evening' : r.afternoon != null ? 'Afternoon' : 'Morning'; })() : 'world price';
   return {
-    lkr: er.rates.LKR, inr: er.rates.INR, rates: er.rates, lkrWeekAgo: week ? week.lkr ?? null : null, inrWeekAgo: week ? week.inr ?? null : null, lkrMonth: lkrM, inrMonth: inrM,
+    lkr: er.rates.LKR, inr: er.rates.INR, rates: Object.fromEntries(Object.entries(er.rates || {}).filter(([c, v]) => /^[A-Z]{3}$/.test(c) && Number.isFinite(v) && v > 0)), lkrWeekAgo: week ? week.lkr ?? null : null, inrWeekAgo: week ? week.inr ?? null : null, lkrMonth: lkrM, inrMonth: inrM,
     gold: isNaN(g24) ? null : { k24: karat(24), k22: karat(22), k21: karat(21), k18: karat(18), poun: karat(22) * 8, month, session },
     board: b ? b.karats.map((r) => ({ karat: r.karat, morning: r.morning, afternoon: r.afternoon, evening: r.evening, yesterday: r.yesterday, change: r.change })) : null,
     fuel: page ? (() => { try { return fuel(page); } catch (e) { return null; } })() : null,
