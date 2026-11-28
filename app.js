@@ -721,9 +721,8 @@ function tiles() {
     '<div class="t-k">this week</div><div class="cols">' + w.days.slice(1, 6).map((d) => '<div>' + esc(d.day) + ico(skyIcon(d.sky, true)) + d.high + '° <span class="t-soft">' + d.low + '°</span></div>').join('') + '</div>',
   ] });
   T.push({ id: 'remote', size: 'm', c: S.accent, label: 'Remote', faces: ['<div style="display:flex;height:100%;align-items:center;justify-content:center">' + ico('pad', 64) + '</div>'] });
-  const ac = S.ac;
   T.push({ id: 'ac', size: 'm', c: C.steel, label: 'Air con', faces: ['<div style="margin-top:4px">' + ico('power', 40) + '</div><div class="t-mid" style="margin-top:14px">press</div><div class="t-line t-soft">' +
-    (ac && ac.ok ? 'last ' + hm(ac.at) : 'on or off') + '</div>'] });
+    'on or off</div>'] });
   if (S.bayern) T.push({ id: 'bayern', size: 'w', c: C.red, label: 'FC Bayern', faces: teamFaces(S.bayern) });
   const ck = S.cricket || [];
   const cf = [ck.find((g) => g.state === 'in'), ck.find((g) => g.state === 'pre'), [...ck].reverse().find((g) => g.state === 'post')].filter(Boolean).map((g) =>
@@ -1332,7 +1331,7 @@ const PAGES = {
     '<input type="file" id="files" accept="image/*" multiple hidden><div id="sendlog" class="sub" style="margin-top:14px"></div>']] },
   ac: { name: 'air con', items: () => [
     ['press', () => '<div class="tilebtn" style="--c:' + C.steel + ';min-height:190px;margin-top:4px" data-act="ac">' + ico('power') + '<div><div class="mid">press</div><div class="s">' +
-      (S.ac ? (S.ac.ok ? 'last pressed at ' + hm(S.ac.at) : esc(S.ac.line)) : 'turns the AC on or off') + '</div></div></div><p class="sub" style="margin-top:14px">One press turns it on or off: nothing can see which it is.</p>'],
+      'turns the AC on or off</div></div></div><p class="sub" style="margin-top:14px">One press turns it on or off: nothing can see which it is.</p>'],
     ['schedules', () => '<div id="sched" class="sub">asking the hub…</div><div id="slist"></div><div class="row"><input id="at" type="time" value="23:30"><select id="days">' +
       '<option value="127">every day</option><option value="31">weekdays</option><option value="96">weekends</option></select><button class="go" id="add">add</button></div>' +
       '<p class="sub" style="margin-top:12px">The hub presses at these times by itself, with the TV off too.</p>'],
